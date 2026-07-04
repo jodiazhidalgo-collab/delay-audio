@@ -1,0 +1,13 @@
+# Git local para delay audio: no subir runtime, backups ni residuos.
+
+_backups/
+.playwright-mcp/
+_codex_runtime/
+logs/
+config/*.json
+!config/*.example.json
+
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

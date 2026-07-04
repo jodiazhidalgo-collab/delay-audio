@@ -1,0 +1,688 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from array import array
+from datetime import datetime
+
+from diagnostico_job import JobDiagnostics, classify_error
+
+
+MAX_DELAY_SEC = 120
+SEGMENT_SEC = 240
+MAX_ZONES = 10
+SAMPLE_RATE = 8000
+FINE_FRAME_MS = 20
+COARSE_FACTOR = 5
+CLUSTER_TOLERANCE_MS = 700
+HINT_SEARCH_RADIUS_MS = 12000
+
+VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".ts", ".mov", ".wmv"}
+
+
+class DelayAudio:
+    def __init__(self, ref_file, esp_file, job_dir, ref_audio_index=None, esp_audio_index=None, profile="pelicula", delay_hint_ms=0):
+        self.ref_file = os.path.abspath(ref_file)
+        self.esp_file = os.path.abspath(esp_file)
+        self.job_dir = os.path.abspath(job_dir)
+        self.ref_audio_index = ref_audio_index
+        self.esp_audio_index = esp_audio_index
+        self.profile = profile if profile in ("pelicula", "trailer") else "pelicula"
+        self.delay_hint_ms = max(-120000, min(120000, int(delay_hint_ms or 0)))
+        self.segment_sec = SEGMENT_SEC
+        self.max_delay_sec = MAX_DELAY_SEC
+        self.max_zones = MAX_ZONES
+        self.cluster_tolerance_ms = CLUSTER_TOLERANCE_MS
+        self.log_path = os.path.join(self.job_dir, "MEDIR_DELAY_AUDIO_LOG.txt")
+        self.csv_path = os.path.join(self.job_dir, "MEDIR_DELAY_AUDIO_RESULTADOS.csv")
+        self.result_path = os.path.join(self.job_dir, "resultado.json")
+        self.progress_path = os.path.join(self.job_dir, "progress.json")
+        self.diag = JobDiagnostics(self.job_dir, os.path.basename(self.job_dir), "delay_audio")
+
+    def reset_logs(self):
+        os.makedirs(self.job_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(self.log_path, "w", encoding="utf-8") as f:
+            f.write(f"MEDIR_DELAY_AUDIO NAS v1 - LOG - {stamp}\n")
+        with open(self.csv_path, "w", encoding="utf-8") as f:
+            f.write("zona;inicio_segundos;inicio_hora;delay_ms;puntuacion;confianza;pista_video;pista_espanol\n")
+
+    def log(self, text):
+        line = str(text).rstrip()
+        with open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        print(line, flush=True)
+
+    def write_result(self, data):
+        with open(self.result_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def write_progress(self, phase, percent, label="", total=None, done=None):
+        data = {
+            "phase": phase,
+            "percent": max(0, min(100, int(round(float(percent))))),
+            "label": label,
+        }
+        if total is not None:
+            data["total"] = int(total)
+        if done is not None:
+            data["done"] = int(done)
+        tmp_path = self.progress_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp_path, self.progress_path)
+
+    def run_cmd(self, cmd, timeout=None):
+        phase = self.command_phase(cmd)
+        started_at = time.time()
+        p = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+        )
+        self.diag.command(phase, cmd[0] if cmd else "command", cmd, p.returncode, started_at, p.stdout, p.stderr, p.returncode == 0)
+        return p.returncode, p.stdout or "", p.stderr or ""
+
+    def command_phase(self, cmd):
+        text = " ".join(map(str, cmd or [])).lower()
+        if "ffprobe" in text and "format=duration" in text:
+            return "probe_duration"
+        if "ffprobe" in text and "-select_streams a" in text:
+            return "probe_audio_tracks"
+        if "ffmpeg" in text and "-f s16le" in text:
+            return "measure_zone"
+        return "tool"
+
+    def get_duration_sec(self, input_file):
+        self.log(f"FFPROBE duration: {input_file}")
+        code, out, err = self.run_cmd([
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            input_file,
+        ])
+        raw = (out + "\n" + err).strip()
+        self.log(raw)
+        if code != 0:
+            raise RuntimeError("ffprobe fallo leyendo duracion. Revisa el LOG.")
+        for line in raw.splitlines():
+            text = line.strip().replace(",", ".")
+            if re.match(r"^[0-9]+(\.[0-9]+)?$", text):
+                return float(text)
+        raise RuntimeError("ffprobe no devolvio duracion valida. Revisa el LOG.")
+
+    def get_audio_streams(self, input_file):
+        self.log(f"FFPROBE audios JSON: {input_file}")
+        code, out, err = self.run_cmd([
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index:stream_tags=language,title",
+            "-of",
+            "json",
+            input_file,
+        ])
+        text = (out + err).strip()
+        self.log(text)
+        if code != 0:
+            raise RuntimeError("ffprobe fallo leyendo pistas de audio. Revisa el LOG.")
+        data = json.loads(text or "{}")
+        streams = data.get("streams") or []
+        if not streams:
+            raise RuntimeError("No encuentro pistas de audio en el archivo.")
+        return streams
+
+    def get_audio_stream_index(self, input_file, prefer_spanish, selected_index=None):
+        streams = self.get_audio_streams(input_file)
+        if selected_index is not None:
+            selected = int(selected_index)
+            for st in streams:
+                if int(st["index"]) == selected:
+                    self.log(f"Pista elegida manualmente: 0:{selected}")
+                    return selected
+            raise RuntimeError(f"La pista elegida no existe en el archivo: 0:{selected}")
+
+        if prefer_spanish:
+            for st in streams:
+                tags = st.get("tags") or {}
+                lang = str(tags.get("language") or "").lower()
+                title = str(tags.get("title") or "").lower()
+                haystack = f"{lang} {title}"
+                spanish = False
+                if re.search(r"(^|[^a-z])(spa|es|esp|esl)([^a-z]|$)", haystack):
+                    spanish = True
+                if any(x in haystack for x in ("spanish", "espanol", "español", "castellano")):
+                    spanish = True
+                if spanish:
+                    idx = int(st["index"])
+                    self.log(f"Pista espanola detectada: 0:{idx} ({haystack})")
+                    return idx
+        idx = int(streams[0]["index"])
+        self.log(f"Pista por defecto: 0:{idx}")
+        return idx
+
+    def configure_profile(self, duration_sec):
+        if self.profile == "trailer":
+            duration = max(1.0, float(duration_sec))
+            segment = min(20.0, max(8.0, duration / 8.0))
+            if duration <= segment + 1.0:
+                segment = max(4.0, duration - 1.0)
+            self.segment_sec = max(4.0, min(segment, duration))
+            self.max_delay_sec = min(30.0, max(5.0, duration * 0.30))
+            self.max_zones = MAX_ZONES
+            self.cluster_tolerance_ms = 500
+            self.apply_delay_hint_profile(duration)
+            return
+        self.segment_sec = SEGMENT_SEC
+        self.max_delay_sec = MAX_DELAY_SEC
+        self.max_zones = MAX_ZONES
+        self.cluster_tolerance_ms = CLUSTER_TOLERANCE_MS
+        self.apply_delay_hint_profile(duration_sec)
+
+    def apply_delay_hint_profile(self, duration_sec):
+        if self.delay_hint_ms == 0:
+            return
+        duration = max(1.0, float(duration_sec))
+        abs_hint_sec = abs(self.delay_hint_ms) / 1000.0
+        hint_radius_sec = HINT_SEARCH_RADIUS_MS / 1000.0
+        self.max_delay_sec = max(self.max_delay_sec, min(MAX_DELAY_SEC, abs_hint_sec + hint_radius_sec))
+        if self.profile == "trailer":
+            self.segment_sec = min(duration, max(self.segment_sec, abs_hint_sec + 24.0))
+            self.cluster_tolerance_ms = max(self.cluster_tolerance_ms, 900)
+
+    def build_zones(self, duration_sec):
+        duration = float(duration_sec)
+        usable = max(0.0, duration - self.segment_sec - 1.0)
+        if self.profile == "trailer":
+            if usable <= 0.0:
+                return [0.0]
+            min_gap = max(4.0, self.segment_sec / 2.0)
+            desired = int(math.floor(duration / min_gap))
+            count = max(1, min(self.max_zones, desired))
+            if count <= 1:
+                return [0.0]
+            step = usable / float(count - 1)
+            return [round(step * idx, 2) for idx in range(count)]
+        ratios = (0.02, 0.08, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.93)
+        zones = []
+        for ratio in ratios:
+            start = round(usable * ratio)
+            if not any(abs(z - start) < 90 for z in zones):
+                zones.append(float(start))
+            if len(zones) >= self.max_zones:
+                break
+        return zones or [0.0]
+
+    def extract_raw(self, input_file, output_raw, audio_stream_index, start_sec, label):
+        start_text = inv(start_sec)
+        duration_text = inv(self.segment_sec)
+        self.log(f"EXTRACT {label} start={start_text} duration={duration_text} stream=0:{audio_stream_index}")
+        code, out, err = self.run_cmd([
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            start_text,
+            "-i",
+            input_file,
+            "-t",
+            duration_text,
+            "-map",
+            f"0:{audio_stream_index}",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(SAMPLE_RATE),
+            "-f",
+            "s16le",
+            output_raw,
+        ])
+        if out.strip():
+            self.log(out.strip())
+        if err.strip():
+            self.log(err.strip())
+        if code != 0:
+            raise RuntimeError(f"FFmpeg fallo extrayendo audio de {label}. Revisa el LOG.")
+        if not os.path.isfile(output_raw):
+            raise RuntimeError(f"No se genero el audio temporal de {label}.")
+        if os.path.getsize(output_raw) < 10000:
+            raise RuntimeError(f"Audio temporal demasiado pequeno en {label}.")
+
+    def get_envelope_20ms(self, raw_path):
+        with open(raw_path, "rb") as f:
+            samples = array("h")
+            samples.frombytes(f.read())
+        if sys.byteorder != "little":
+            samples.byteswap()
+        frame_samples = int(SAMPLE_RATE * FINE_FRAME_MS / 1000)
+        frame_count = len(samples) // frame_samples
+        if frame_count < 200:
+            raise RuntimeError("Muy poco audio para analizar.")
+        env = []
+        for frame in range(frame_count):
+            base = frame * frame_samples
+            total = 0.0
+            for value in samples[base:base + frame_samples]:
+                total += float(value) * float(value)
+            rms = math.sqrt(total / frame_samples)
+            env.append(math.log(1.0 + rms))
+        return env
+
+    def analyze_zone(self, zone_number, start_sec, ref_index, esp_index, work_dir):
+        ref_raw = os.path.join(work_dir, f"ref_{zone_number}.raw")
+        esp_raw = os.path.join(work_dir, f"esp_{zone_number}.raw")
+        self.extract_raw(self.ref_file, ref_raw, ref_index, start_sec, f"VIDEO BUENO zona {zone_number}")
+        self.extract_raw(self.esp_file, esp_raw, esp_index, start_sec, f"AUDIO ESPANOL zona {zone_number}")
+
+        ref_env = self.get_envelope_20ms(ref_raw)
+        esp_env = self.get_envelope_20ms(esp_raw)
+        ref_smooth = smooth(ref_env, 4)
+        esp_smooth = smooth(esp_env, 4)
+        ref_der = derivative(ref_smooth)
+        esp_der = derivative(esp_smooth)
+
+        ref_fine_1 = normalize(ref_smooth)
+        esp_fine_1 = normalize(esp_smooth)
+        ref_fine_2 = normalize(ref_der)
+        esp_fine_2 = normalize(esp_der)
+
+        ref_coarse_1 = normalize(downsample(ref_smooth, COARSE_FACTOR))
+        esp_coarse_1 = normalize(downsample(esp_smooth, COARSE_FACTOR))
+        ref_coarse_2 = normalize(downsample(ref_der, COARSE_FACTOR))
+        esp_coarse_2 = normalize(downsample(esp_der, COARSE_FACTOR))
+
+        coarse_frame_ms = FINE_FRAME_MS * COARSE_FACTOR
+        max_coarse_lag = round((self.max_delay_sec * 1000.0) / coarse_frame_ms)
+        if self.delay_hint_ms != 0:
+            center_coarse_lag = round(self.delay_hint_ms / coarse_frame_ms)
+            radius_coarse_lag = round(HINT_SEARCH_RADIUS_MS / coarse_frame_ms)
+            coarse_min = max(-max_coarse_lag, center_coarse_lag - radius_coarse_lag)
+            coarse_max = min(max_coarse_lag, center_coarse_lag + radius_coarse_lag)
+        else:
+            coarse_min = -max_coarse_lag
+            coarse_max = max_coarse_lag
+        coarse = find_best_lag_range(
+            ref_coarse_1,
+            esp_coarse_1,
+            ref_coarse_2,
+            esp_coarse_2,
+            coarse_min,
+            coarse_max,
+        )
+
+        center_fine_lag = int(coarse["lag"] * COARSE_FACTOR)
+        fine_radius = round(2500.0 / FINE_FRAME_MS)
+        max_fine_lag = round((self.max_delay_sec * 1000.0) / FINE_FRAME_MS)
+        fine_min = max(-max_fine_lag, center_fine_lag - fine_radius)
+        fine_max = min(max_fine_lag, center_fine_lag + fine_radius)
+        fine = find_best_lag_range(ref_fine_1, esp_fine_1, ref_fine_2, esp_fine_2, fine_min, fine_max)
+
+        delay_ms = round(fine["lag"] * FINE_FRAME_MS)
+        score = float(fine["score"])
+        if score >= 0.48:
+            confidence = "ALTA"
+        elif score >= 0.30:
+            confidence = "MEDIA"
+        elif score >= 0.18:
+            confidence = "BAJA"
+        else:
+            confidence = "MUY BAJA"
+
+        row = {
+            "zone": int(zone_number),
+            "start_sec": float(start_sec),
+            "start_text": format_time_simple(start_sec),
+            "delay_ms": int(delay_ms),
+            "score": score,
+            "confidence": confidence,
+            "delay_hint_ms": int(self.delay_hint_ms),
+            "search_min_ms": int(coarse_min * coarse_frame_ms),
+            "search_max_ms": int(coarse_max * coarse_frame_ms),
+        }
+        with open(self.csv_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"{row['zone']};{inv(row['start_sec'])};{row['start_text']};{row['delay_ms']};"
+                f"{score:.3f};{confidence};0:{ref_index};0:{esp_index}\n"
+            )
+        return row
+
+    def recommended_delay(self, results):
+        usable = [r for r in results if r["score"] >= 0.18]
+        if not usable:
+            usable = sorted(results, key=lambda r: r["score"], reverse=True)[:3]
+
+        clusters = []
+        for result in sorted(usable, key=lambda r: r["delay_ms"]):
+            placed = False
+            for cluster in clusters:
+                if abs(result["delay_ms"] - cluster["center"]) <= self.cluster_tolerance_ms:
+                    cluster["items"].append(result)
+                    sum_w = 0.0
+                    sum_d = 0.0
+                    for item in cluster["items"]:
+                        weight = max(0.05, float(item["score"]))
+                        weight = weight * weight
+                        sum_w += weight
+                        sum_d += item["delay_ms"] * weight
+                    cluster["center"] = sum_d / sum_w
+                    placed = True
+                    break
+            if not placed:
+                clusters.append({"center": float(result["delay_ms"]), "items": [result]})
+
+        ranked = []
+        for cluster in clusters:
+            count = len(cluster["items"])
+            avg_score = sum(float(item["score"]) for item in cluster["items"]) / count
+            strength = (avg_score * 100.0) + (count * 18.0)
+            ranked.append({
+                "center": round(cluster["center"]),
+                "count": count,
+                "avg_score": avg_score,
+                "strength": strength,
+                "items": cluster["items"],
+            })
+        if not ranked:
+            raise RuntimeError("No he podido agrupar resultados.")
+        best = sorted(ranked, key=lambda r: r["strength"], reverse=True)[0]
+        if best["count"] >= 3 and best["avg_score"] >= 0.30:
+            final_confidence = "ALTA"
+        elif best["count"] >= 2 and best["avg_score"] >= 0.22:
+            final_confidence = "MEDIA"
+        elif best["avg_score"] >= 0.30:
+            final_confidence = "MEDIA"
+        else:
+            final_confidence = "BAJA"
+        return {
+            "delay_ms": int(best["center"]),
+            "confidence": final_confidence,
+            "count": int(best["count"]),
+            "avg_score": float(best["avg_score"]),
+            "clusters": ranked,
+        }
+
+    def run(self):
+        self.reset_logs()
+        self.diag.init(inputs={
+            "video_bueno": self.ref_file,
+            "video_espanol": self.esp_file,
+            "ref_audio": self.ref_audio_index,
+            "esp_audio": self.esp_audio_index,
+        }, settings={
+            "profile": self.profile,
+            "segment_sec": self.segment_sec,
+            "max_delay_sec": self.max_delay_sec,
+            "max_zones": self.max_zones,
+            "delay_hint_ms": self.delay_hint_ms,
+        })
+        self.write_progress("starting", 0, "Arrancando")
+        try:
+            self.diag.event("validate_inputs", "started", "Validando entradas")
+            self.log("ARGUMENTOS RECIBIDOS: 2")
+            self.log(f"VIDEO BUENO: {self.ref_file}")
+            self.log(f"VIDEO ESPANOL: {self.esp_file}")
+            validate_video(self.ref_file)
+            validate_video(self.esp_file)
+            self.diag.event("validate_inputs", "finished", "Entradas validas")
+
+            self.diag.event("probe_ref", "started", "Leyendo duracion del video bueno", {"path": self.ref_file})
+            duration_ref = self.get_duration_sec(self.ref_file)
+            self.diag.event("probe_ref", "finished", "Duracion video bueno leida", {"duration_sec": duration_ref})
+            self.diag.event("probe_esp", "started", "Leyendo duracion del video espanol", {"path": self.esp_file})
+            duration_esp = self.get_duration_sec(self.esp_file)
+            self.diag.event("probe_esp", "finished", "Duracion video espanol leida", {"duration_sec": duration_esp})
+            duration = min(duration_ref, duration_esp)
+            self.configure_profile(duration)
+            self.diag.event("measure_setup", "profile_configured", "Perfil de medicion configurado", {
+                "profile": self.profile,
+                "segment_sec": self.segment_sec,
+                "max_delay_sec": self.max_delay_sec,
+                "max_zones": self.max_zones,
+                "delay_hint_ms": self.delay_hint_ms,
+            })
+            self.diag.event("select_audio_tracks", "started", "Seleccionando pistas de audio")
+            ref_index = self.get_audio_stream_index(self.ref_file, False, self.ref_audio_index)
+            esp_index = self.get_audio_stream_index(self.esp_file, True, self.esp_audio_index)
+            self.diag.event("select_audio_tracks", "finished", "Pistas de audio seleccionadas", {
+                "ref_stream": f"0:{ref_index}",
+                "esp_stream": f"0:{esp_index}",
+            })
+
+            self.log(f"Duracion video bueno: {format_time_simple(duration_ref)}")
+            self.log(f"Duracion audio espanol: {format_time_simple(duration_esp)}")
+            self.log(f"Pista usada en VIDEO BUENO: 0:{ref_index}")
+            self.log(f"Pista usada en AUDIO ESPANOL: 0:{esp_index}")
+            self.log(f"Perfil de medicion: {self.profile}")
+            if self.delay_hint_ms != 0:
+                self.log(f"Ayuda visual de busqueda: {self.delay_hint_ms} ms")
+
+            zones = self.build_zones(duration)
+            self.log(f"Zonas que voy a analizar: {len(zones)}")
+            self.log(f"Duracion por zona: {inv(self.segment_sec)} segundos")
+            self.log(f"Busqueda maxima: +/-{inv(self.max_delay_sec)} segundos")
+            self.diag.event("measure_setup", "finished", "Zonas de medicion preparadas", {
+                "zones": len(zones),
+                "duration_sec": duration,
+                "segment_sec": self.segment_sec,
+                "delay_hint_ms": self.delay_hint_ms,
+            })
+            self.write_progress("measure", 0, "Midiendo", len(zones), 0)
+
+            work_dir = os.path.join(self.job_dir, "tmp")
+            if os.path.isdir(work_dir):
+                shutil.rmtree(work_dir, ignore_errors=True)
+            os.makedirs(work_dir, exist_ok=True)
+            self.log(f"WORKDIR: {work_dir}")
+
+            results = []
+            for index, start in enumerate(zones, 1):
+                self.log(f"Analizando zona {index}/{len(zones)} desde {format_time_simple(start)}...")
+                self.diag.event("measure_zone", "started", f"Analizando zona {index}", {
+                    "zone": index,
+                    "start_sec": start,
+                    "start_text": format_time_simple(start),
+                })
+                self.write_progress("measure", ((index - 1) / len(zones)) * 100, "Midiendo", len(zones), index - 1)
+                try:
+                    row = self.analyze_zone(index, start, ref_index, esp_index, work_dir)
+                    results.append(row)
+                    self.log(
+                        "  Delay: {delay_ms} ms | Confianza zona: {confidence} | Puntuacion: {score:.3f}".format(**row)
+                    )
+                    self.diag.event("measure_zone", "finished", f"Zona {index} medida", row)
+                except Exception as exc:
+                    self.log(f"ERROR ZONA {index} : {exc}")
+                    self.log(f"  Zona saltada: {exc}")
+                    self.diag.error(classify_error(str(exc)), "measure_zone", f"Zona {index} fallida", {
+                        "zone": index,
+                        "start_sec": start,
+                        "error": str(exc),
+                    }, exc)
+                self.write_progress("measure", (index / len(zones)) * 100, "Midiendo", len(zones), index)
+
+            shutil.rmtree(work_dir, ignore_errors=True)
+            self.diag.event("cleanup", "remove_measure_tmp", "Temporales de medicion eliminados", {"work_dir": work_dir})
+            if not results:
+                raise RuntimeError("No he podido analizar ninguna zona. Mira el LOG.")
+
+            self.diag.event("calculate_final_delay", "started", "Calculando delay final", {"valid_zones": len(results)})
+            rec = self.recommended_delay(results)
+            self.diag.event("calculate_final_delay", "finished", "Delay final calculado", rec)
+            self.log("==================================================")
+            self.log("RESULTADO")
+            self.log("==================================================")
+            self.log("VALOR PARA MKVToolNix:")
+            self.log(f"Delay audio espanol: {rec['delay_ms']} ms")
+            self.log(f"Confianza final: {rec['confidence']}")
+            self.log(f"Zonas que coinciden: {rec['count']}")
+            self.log(f"Puntuacion media: {rec['avg_score']:.3f}")
+            self.log(
+                "RESULTADO FINAL: {delay_ms} ms | Confianza {confidence} | Zonas {count} | Score {avg_score}".format(
+                    **rec
+                )
+            )
+            data = {
+                "ok": True,
+                "delay_ms": rec["delay_ms"],
+                "confidence": rec["confidence"],
+                "zones_count": rec["count"],
+                "avg_score": rec["avg_score"],
+                "profile": self.profile,
+                "segment_sec": self.segment_sec,
+                "max_delay_sec": self.max_delay_sec,
+                "delay_hint_ms": self.delay_hint_ms,
+                "ref_stream": f"0:{ref_index}",
+                "esp_stream": f"0:{esp_index}",
+                "results": results,
+                "csv_path": self.csv_path,
+                "log_path": self.log_path,
+            }
+            self.write_result(data)
+            self.write_progress("done", 100, "Listo", len(zones), len(zones))
+            self.diag.finish("measure_done", data)
+            return 0
+        except Exception as exc:
+            self.log(f"ERROR: {exc}")
+            data = {"ok": False, "error": str(exc), "log_path": self.log_path, "csv_path": self.csv_path}
+            self.write_result(data)
+            self.write_progress("error", 100, "Aviso")
+            self.diag.error(classify_error(str(exc)), "measure", str(exc), {}, exc)
+            self.diag.finish("error", data)
+            return 1
+
+
+def inv(number):
+    return str(float(number)).rstrip("0").rstrip(".") if "." in str(float(number)) else str(int(number))
+
+
+def format_time_simple(seconds):
+    total = round(max(0.0, float(seconds)))
+    hour = total // 3600
+    minute = (total % 3600) // 60
+    sec = total % 60
+    return f"{hour:02d}:{minute:02d}:{sec:02d}"
+
+
+def validate_video(path):
+    if not os.path.isfile(path):
+        raise RuntimeError(f"No existe el archivo: {path}")
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in VIDEO_EXTENSIONS:
+        raise RuntimeError(f"Extension no soportada: {ext}")
+
+
+def smooth(values, radius):
+    size = len(values)
+    prefix = [0.0]
+    for value in values:
+        prefix.append(prefix[-1] + value)
+    out = []
+    for idx in range(size):
+        start = max(0, idx - radius)
+        end = min(size - 1, idx + radius)
+        out.append((prefix[end + 1] - prefix[start]) / (end - start + 1))
+    return out
+
+
+def downsample(values, factor):
+    count = len(values) // factor
+    if count < 20:
+        raise RuntimeError("Audio demasiado corto para busqueda gruesa.")
+    return [sum(values[i * factor:(i + 1) * factor]) / factor for i in range(count)]
+
+
+def derivative(values):
+    if not values:
+        return []
+    out = [0.0]
+    for idx in range(1, len(values)):
+        out.append(values[idx] - values[idx - 1])
+    return out
+
+
+def normalize(values):
+    count = len(values)
+    mean = sum(values) / count
+    variance = sum((value - mean) * (value - mean) for value in values)
+    std = math.sqrt(variance / max(1.0, count - 1))
+    if std < 0.000001:
+        raise RuntimeError("Audio casi plano o silencioso.")
+    return [(value - mean) / std for value in values]
+
+
+def corr_at_lag(a_values, b_values, lag):
+    n_a = len(a_values)
+    n_b = len(b_values)
+    start = max(0, lag)
+    end = min(n_a - 1, n_b - 1 + lag)
+    count = end - start + 1
+    if count < 50:
+        return float("-inf")
+    score = 0.0
+    a_local = a_values
+    b_local = b_values
+    for idx in range(start, end + 1):
+        score += a_local[idx] * b_local[idx - lag]
+    return score / count
+
+
+def find_best_lag_range(a1, b1, a2, b2, lag_min, lag_max):
+    best_lag = 0
+    best_score = float("-inf")
+    second_score = float("-inf")
+    for lag in range(int(lag_min), int(lag_max) + 1):
+        s1 = corr_at_lag(a1, b1, lag)
+        s2 = corr_at_lag(a2, b2, lag)
+        score = (s1 * 0.45) + (s2 * 0.55)
+        if score > best_score:
+            second_score = best_score
+            best_score = score
+            best_lag = lag
+        elif score > second_score:
+            second_score = score
+    return {"lag": best_lag, "score": best_score, "gap": best_score - second_score}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ref", required=True, help="Video bueno de imagen")
+    parser.add_argument("--esp", required=True, help="Video con audio espanol")
+    parser.add_argument("--job-dir", required=True, help="Carpeta de trabajo/logs")
+    parser.add_argument("--ref-audio-index", type=int, help="Pista de audio del video bueno")
+    parser.add_argument("--esp-audio-index", type=int, help="Pista de audio del video espanol")
+    parser.add_argument("--profile", choices=("pelicula", "trailer"), default="pelicula", help="Perfil de medicion")
+    parser.add_argument("--delay-hint-ms", type=int, default=0, help="Ayuda visual opcional para centrar la busqueda")
+    args = parser.parse_args()
+    return DelayAudio(
+        args.ref,
+        args.esp,
+        args.job_dir,
+        args.ref_audio_index,
+        args.esp_audio_index,
+        args.profile,
+        args.delay_hint_ms,
+    ).run()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
