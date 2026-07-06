@@ -146,6 +146,7 @@ FOLDER_BY_ID = {
         "nested": True,
         "limit": 20,
         "child_prefix": "trailer",
+        "child_name_suffixes": ["-trailer", " trailer", "_trailer", ".trailer"],
     },
     "hospital": {
         "id": "hospital",
@@ -1177,7 +1178,19 @@ def read_text_content(path):
     return data.decode("utf-8", errors="replace").replace("\r\n", "\n")
 
 
-def child_items(root, limit=5, prefix=None, suffixes=None, include_dirs=False):
+def child_name_allowed(name, prefix=None, name_suffixes=None):
+    if not prefix and not name_suffixes:
+        return True
+
+    normalized_name = normalize_search_text(name)
+    if prefix and normalized_name.startswith(normalize_search_text(prefix)):
+        return True
+
+    stem = normalize_search_text(Path(name).stem).strip()
+    return any(stem.endswith(normalize_search_text(suffix)) for suffix in name_suffixes or [])
+
+
+def child_items(root, limit=5, prefix=None, suffixes=None, include_dirs=False, name_suffixes=None):
     children = []
     allowed_suffixes = {suffix.lower() for suffix in suffixes or []}
     try:
@@ -1188,7 +1201,7 @@ def child_items(root, limit=5, prefix=None, suffixes=None, include_dirs=False):
                 is_dir = entry.is_dir(follow_symlinks=False)
                 if not is_file and not (include_dirs and is_dir):
                     continue
-                if prefix and not entry.name.lower().startswith(prefix.lower()):
+                if not child_name_allowed(entry.name, prefix, name_suffixes):
                     continue
                 path = Path(entry.path)
                 if is_file and allowed_suffixes and path.suffix.lower() not in allowed_suffixes:
@@ -1965,6 +1978,7 @@ def scan_folder(folder):
                     prefix=folder.get("child_prefix"),
                     suffixes=folder.get("child_suffixes"),
                     include_dirs=bool(folder.get("child_include_dirs")),
+                    name_suffixes=folder.get("child_name_suffixes"),
                 )
             result["items"].append(item)
 
