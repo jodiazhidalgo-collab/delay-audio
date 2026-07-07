@@ -77,8 +77,11 @@ let trailerAudioSelection = "";
 let trailerBusyMode = "";
 const workshopStorageKey = "delay-audio-workshop-state";
 const trailerJobStorageKey = "delay-audio-trailer-job-state";
-const queueMoviesPath = "/data/downloads/torrents/queue/movies";
-const completeMoviesPath = "/data/downloads/torrents/complete/movies";
+const delayAudioConfig = window.DelayAudioConfig || {};
+const mediaRootPath = delayAudioConfig.mediaRootPath || "/media";
+const queueMoviesPath = delayAudioConfig.queueMoviesPath || "/data/downloads/torrents/queue/movies";
+const completeMoviesPath = delayAudioConfig.completeMoviesPath || "/data/downloads/torrents/complete/movies";
+const hospitalPath = delayAudioConfig.hospitalPath || `${mediaRootPath}/Hospital`;
 let workshopBusy = false;
 let workshopTimer = null;
 let trailerJobTimer = null;
@@ -131,7 +134,7 @@ const workshopOutputPresets = [
   {
     key: "hospital",
     label: "Hospital",
-    path: "/data/media/Hospital"
+    path: hospitalPath
   }
 ];
 
@@ -2178,7 +2181,7 @@ function renderCustomMovePanel() {
         <div class="custom-move-breadcrumbs">${breadcrumbs}</div>
         ${upButton}
       </div>
-      <div class="custom-move-current" title="${escapeHtml(customMoveState.path || "/data/media")}">${escapeHtml(customMoveState.path || "/data/media")}</div>
+      <div class="custom-move-current" title="${escapeHtml(customMoveState.path || mediaRootPath)}">${escapeHtml(customMoveState.path || mediaRootPath)}</div>
       <div class="custom-move-list">${list}</div>
       <div class="custom-move-footer">
         <button class="item-action-button soft" type="button" data-custom-move-back ${disabled}>Volver</button>
@@ -2205,7 +2208,7 @@ function openCustomMoveSelector() {
     error: "",
     parts: [],
     items: [],
-    path: "/data/media"
+    path: mediaRootPath
   };
   renderActionModal();
   loadCustomMoveFolder([]);
@@ -2238,7 +2241,7 @@ async function loadCustomMoveFolder(parts = []) {
       error: "",
       parts: Array.isArray(data.parts) ? data.parts : cleanParts,
       items: Array.isArray(data.items) ? data.items : [],
-      path: data.path || "/data/media"
+      path: data.path || mediaRootPath
     };
   } catch (error) {
     customMoveState = {

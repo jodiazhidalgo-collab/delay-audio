@@ -53,50 +53,67 @@ LOG_ERROR_SUMMARY_COUNTS = {2, 10, 50, 100, 250, 500, 1000}
 BTDIGG_RD_TRACKING_FILE = os.environ.get("BTDIGG_RD_TRACKING_FILE", "/btdigg-rd-data/seguimiento_actual.json")
 BTDIGG_RD_TIMEOUT_SEC = float(os.environ.get("BTDIGG_RD_TIMEOUT_SEC", "4"))
 BTDIGG_RD_RECENT_VISIBLE_SEC = int(os.environ.get("BTDIGG_RD_RECENT_VISIBLE_SEC", "180"))
-RDT_BASE_URL = os.environ.get("RDT_BASE", "http://rdtclient:6500").rstrip("/")
-RDT_USER = os.environ.get("RDT_USER", "admin")
+RDT_BASE_URL = os.environ.get("RDT_BASE", "").rstrip("/")
+RDT_USER = os.environ.get("RDT_USER", "")
 RDT_PASS = os.environ.get("RDT_PASS", "")
-QBIT_BASE_URL = os.environ.get("QBIT_BASE_URL", "http://qbittorrent:8080").rstrip("/")
-QBIT_USER = os.environ.get("QBIT_USER", "admin")
-QBIT_PASS = os.environ.get("QBIT_PASS", "CAMBIAR_EN_ENTORNO_REAL")
+QBIT_BASE_URL = (os.environ.get("QBIT_BASE_URL") or os.environ.get("QBIT_BASE") or "").rstrip("/")
+QBIT_USER = os.environ.get("QBIT_USER", "")
+QBIT_PASS = os.environ.get("QBIT_PASS", "")
 QBIT_CACHE_TTL_SEC = int(os.environ.get("QBIT_CACHE_TTL_SEC", "5"))
 QBIT_TIMEOUT_SEC = float(os.environ.get("QBIT_TIMEOUT_SEC", "4"))
 QBIT_CACHE_LOCK = threading.Lock()
 QBIT_CACHE = {"ts": 0.0, "data": None}
 SEARCHABLE_MEDIA_FOLDERS = {"media_movies", "media_tv"}
-MEDIA_MOVE_ROOT = Path(os.environ.get("MEDIA_MOVE_ROOT", "/data/media")).resolve()
+DATA_ROOT = os.environ.get("DELAY_AUDIO_DATA_ROOT", "/data")
+MEDIA_ROOT = os.environ.get("DELAY_AUDIO_MEDIA_ROOT", "/media")
+DOWNLOADS_ROOT = os.environ.get("DELAY_AUDIO_DOWNLOADS_ROOT", f"{DATA_ROOT}/downloads/torrents")
+COMPLETE_ROOT = os.environ.get("DELAY_AUDIO_COMPLETE_ROOT", f"{DOWNLOADS_ROOT}/complete")
+QUEUE_ROOT = os.environ.get("DELAY_AUDIO_QUEUE_ROOT", f"{DOWNLOADS_ROOT}/queue")
+MEDIA_MOVE_ROOT = Path(os.environ.get("MEDIA_MOVE_ROOT", MEDIA_ROOT)).resolve()
+MEDIA_MOVIES_PATH = os.environ.get("DELAY_AUDIO_MEDIA_MOVIES_PATH", f"{MEDIA_ROOT}/movies")
+MEDIA_TV_PATH = os.environ.get("DELAY_AUDIO_MEDIA_TV_PATH", f"{MEDIA_ROOT}/tv")
+MEDIA_INFANTILES_PATH = os.environ.get("DELAY_AUDIO_MEDIA_INFANTILES_PATH", f"{MEDIA_ROOT}/infantiles")
+MEDIA_HOSPITAL_PATH = os.environ.get("DELAY_AUDIO_MEDIA_HOSPITAL_PATH", f"{MEDIA_ROOT}/Hospital")
+MEDIA_REPETIDAS_ERROR_PATH = os.environ.get("DELAY_AUDIO_MEDIA_REPETIDAS_ERROR_PATH", f"{MEDIA_ROOT}/repetidas_vs_error")
+COMPLETE_MOVIES_PATH = os.environ.get("DELAY_AUDIO_COMPLETE_MOVIES_PATH", f"{COMPLETE_ROOT}/movies")
+QUEUE_MOVIES_PATH = os.environ.get("DELAY_AUDIO_QUEUE_MOVIES_PATH", f"{QUEUE_ROOT}/movies")
+COMPLETE_TV_PATH = os.environ.get("DELAY_AUDIO_COMPLETE_TV_PATH", f"{COMPLETE_ROOT}/tv")
+QUEUE_TV_PATH = os.environ.get("DELAY_AUDIO_QUEUE_TV_PATH", f"{QUEUE_ROOT}/tv")
+COMPLETE_TALLER_PATH = os.environ.get("DELAY_AUDIO_COMPLETE_TALLER_PATH", f"{COMPLETE_ROOT}/taller")
+MOVIES_AUTOMATIZACION_PATH = os.environ.get("DELAY_AUDIO_MOVIES_AUTOMATIZACION_PATH", f"{COMPLETE_ROOT}/movies_automatizacion")
+TRAILERS_AUTOMATIZACION_PATH = os.environ.get("DELAY_AUDIO_TRAILERS_AUTOMATIZACION_PATH", f"{COMPLETE_ROOT}/trailers_automatizacion")
 MOVE_DESTINATIONS = {
     "move_movies": {
         "label": "Movies",
-        "path": "/data/media/movies",
+        "path": MEDIA_MOVIES_PATH,
     },
     "move_tv": {
         "label": "TV",
-        "path": "/data/media/tv",
+        "path": MEDIA_TV_PATH,
     },
     "move_infantiles": {
         "label": "Infantiles",
-        "path": "/data/media/infantiles",
+        "path": MEDIA_INFANTILES_PATH,
     },
     "move_movies_automatizacion": {
         "label": "Movies Automatizacion",
-        "path": "/data/downloads/torrents/complete/movies_automatizacion",
+        "path": MOVIES_AUTOMATIZACION_PATH,
     },
     "move_complete": {
         "label": "Complete Movies",
-        "path": "/data/downloads/torrents/complete/movies",
+        "path": COMPLETE_MOVIES_PATH,
     },
     "move_queue": {
         "label": "Queue Movies",
-        "path": "/data/downloads/torrents/queue/movies",
+        "path": QUEUE_MOVIES_PATH,
     },
     "move_repetidas_error": {
         "label": "Repetidas / Error",
-        "path": "/data/media/repetidas_vs_error",
+        "path": MEDIA_REPETIDAS_ERROR_PATH,
     },
     "move_hospital": {
         "label": "Hospital",
-        "path": "/data/media/Hospital",
+        "path": MEDIA_HOSPITAL_PATH,
     },
 }
 
@@ -104,29 +121,29 @@ FOLDER_BY_ID = {
     "complete_movies": {
         "id": "complete_movies",
         "name": "Complete Movies",
-        "path": "/data/downloads/torrents/complete/movies",
-        "real_path": "/data/downloads/torrents/complete/movies",
+        "path": COMPLETE_MOVIES_PATH,
+        "real_path": COMPLETE_MOVIES_PATH,
         "lazy_children": True,
     },
     "queue_movies": {
         "id": "queue_movies",
         "name": "Queue Movies",
-        "path": "/data/downloads/torrents/queue/movies",
-        "real_path": "/data/downloads/torrents/queue/movies",
+        "path": QUEUE_MOVIES_PATH,
+        "real_path": QUEUE_MOVIES_PATH,
         "lazy_children": True,
     },
     "movies_automatizacion": {
         "id": "movies_automatizacion",
         "name": "Movies Automatizacion",
-        "path": "/data/downloads/torrents/complete/movies_automatizacion",
-        "real_path": "/data/downloads/torrents/complete/movies_automatizacion",
+        "path": MOVIES_AUTOMATIZACION_PATH,
+        "real_path": MOVIES_AUTOMATIZACION_PATH,
         "lazy_children": True,
     },
     "complete_taller": {
         "id": "complete_taller",
         "name": "Taller",
-        "path": "/data/downloads/torrents/complete/taller",
-        "real_path": "/data/downloads/torrents/complete/taller",
+        "path": COMPLETE_TALLER_PATH,
+        "real_path": COMPLETE_TALLER_PATH,
         "flat_files": True,
         "lazy_children": True,
         "limit": 0,
@@ -134,15 +151,15 @@ FOLDER_BY_ID = {
     "media_movies": {
         "id": "media_movies",
         "name": "Media Movies",
-        "path": "/data/media/movies",
-        "real_path": "/data/media/movies",
+        "path": MEDIA_MOVIES_PATH,
+        "real_path": MEDIA_MOVIES_PATH,
         "lazy_children": True,
     },
     "media_movies_trailer": {
         "id": "media_movies_trailer",
         "name": "Media Movies",
-        "path": "/data/media/movies",
-        "real_path": "/data/media/movies",
+        "path": MEDIA_MOVIES_PATH,
+        "real_path": MEDIA_MOVIES_PATH,
         "nested": True,
         "limit": 20,
         "child_prefix": "trailer",
@@ -151,37 +168,37 @@ FOLDER_BY_ID = {
     "hospital": {
         "id": "hospital",
         "name": "Hospital",
-        "path": "/data/media/Hospital",
-        "real_path": "/data/media/Hospital",
+        "path": MEDIA_HOSPITAL_PATH,
+        "real_path": MEDIA_HOSPITAL_PATH,
         "lazy_children": True,
         "limit": 0,
     },
     "complete_tv": {
         "id": "complete_tv",
         "name": "Complete TV",
-        "path": "/data/downloads/torrents/complete/tv",
-        "real_path": "/data/downloads/torrents/complete/tv",
+        "path": COMPLETE_TV_PATH,
+        "real_path": COMPLETE_TV_PATH,
         "lazy_children": True,
     },
     "queue_tv": {
         "id": "queue_tv",
         "name": "Queue TV",
-        "path": "/data/downloads/torrents/queue/tv",
-        "real_path": "/data/downloads/torrents/queue/tv",
+        "path": QUEUE_TV_PATH,
+        "real_path": QUEUE_TV_PATH,
         "lazy_children": True,
     },
     "media_tv": {
         "id": "media_tv",
         "name": "Media TV",
-        "path": "/data/media/tv",
-        "real_path": "/data/media/tv",
+        "path": MEDIA_TV_PATH,
+        "real_path": MEDIA_TV_PATH,
         "lazy_children": True,
     },
     "trailers": {
         "id": "trailers",
         "name": "Movies Automatizacion Trailer",
-        "path": "/data/downloads/torrents/complete/trailers_automatizacion",
-        "real_path": "/data/downloads/torrents/complete/trailers_automatizacion",
+        "path": TRAILERS_AUTOMATIZACION_PATH,
+        "real_path": TRAILERS_AUTOMATIZACION_PATH,
         "nested": True,
         "limit": 20,
         "child_limit": 0,
@@ -190,8 +207,8 @@ FOLDER_BY_ID = {
     "repetidas_error": {
         "id": "repetidas_error",
         "name": "Repetidas / Error",
-        "path": "/data/media/repetidas_vs_error",
-        "real_path": "/data/media/repetidas_vs_error",
+        "path": MEDIA_REPETIDAS_ERROR_PATH,
+        "real_path": MEDIA_REPETIDAS_ERROR_PATH,
         "lazy_children": True,
         "limit": 0,
     },

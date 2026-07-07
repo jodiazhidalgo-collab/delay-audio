@@ -29,8 +29,16 @@ PREVIEW_ROOT = "/logs/delay_audio_preview"
 MOTOR = "/motor/delay_audio/medir_delay_audio.py"
 CONFIG_PATH = "/config/delay_audio.json"
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".ts", ".mov", ".wmv"}
-QUEUE_MOVIES_PATH = "/data/downloads/torrents/queue/movies"
-COMPLETE_MOVIES_PATH = "/data/downloads/torrents/complete/movies"
+DATA_ROOT = os.environ.get("DELAY_AUDIO_DATA_ROOT", "/data")
+MEDIA_ROOT = os.environ.get("DELAY_AUDIO_MEDIA_ROOT", "/media")
+QUEUE_MOVIES_PATH = os.environ.get(
+    "DELAY_AUDIO_QUEUE_MOVIES_PATH",
+    f"{DATA_ROOT}/downloads/torrents/queue/movies",
+)
+COMPLETE_MOVIES_PATH = os.environ.get(
+    "DELAY_AUDIO_COMPLETE_MOVIES_PATH",
+    f"{DATA_ROOT}/downloads/torrents/complete/movies",
+)
 AUDIO_NORMALIZE_THRESHOLD_MS = 500
 AUDIO_FINAL_MAX_FIRST_PACKET_MS = 1000
 AUDIO_DURATION_TOLERANCE_SEC = 1.0
@@ -47,8 +55,8 @@ DEFAULT_CONFIG = {
     "sub_fuente_espanol": "ESPAÑOL delay audio",
 }
 ROOTS = [
-    {"key": "data", "label": "Data", "path": "/data"},
-    {"key": "media", "label": "Media", "path": "/media"},
+    {"key": "data", "label": "Data", "path": DATA_ROOT},
+    {"key": "media", "label": "Media", "path": MEDIA_ROOT},
 ]
 ROOT_BUTTON_ORDER = ("media", "data")
 
@@ -271,7 +279,7 @@ def vista_delay_audio():
           <b id="delay-modo">Selecciona video bueno</b>
           <button class="delay-close" onclick="delayAudioCerrarSelector()">Cerrar</button>
         </div>
-        <span id="delay-path" class="delay-path">/data</span>
+        <span id="delay-path" class="delay-path">{esc(DATA_ROOT)}</span>
         <div class="delay-root-actions">
           {root_buttons}
         </div>
