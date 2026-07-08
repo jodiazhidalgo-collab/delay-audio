@@ -2385,6 +2385,13 @@ button.watch-chevron {
   color: #dff4ff;
 }
 
+.workshop-edit.is-duration-warning {
+  border-color: rgba(255, 200, 79, .46);
+  background: rgba(232, 171, 45, .28);
+  color: #ffe8a6;
+  box-shadow: inset 0 0 0 1px rgba(255, 200, 79, .34);
+}
+
 .workshop-preview-modal {
   position: fixed;
   inset: 0;

@@ -918,6 +918,7 @@ function renderWorkshopMetaPill(value, type, alerts) {
 function renderWorkshopSlot(kind, slot, alerts = {}) {
   const selected = Boolean(slot?.path);
   const label = workshopSlotLabel(kind);
+  const editWarningClass = alerts?.durationWarning ? " is-duration-warning" : "";
   return `
     <section class="workshop-slot ${selected ? "has-video" : ""}">
       <div class="workshop-slot-head">
@@ -925,7 +926,7 @@ function renderWorkshopSlot(kind, slot, alerts = {}) {
           <div class="workshop-kicker">${escapeHtml(label)}</div>
           <h2>${selected ? escapeHtml(slot.name || "Video seleccionado") : "Sin seleccionar"}</h2>
         </div>
-        ${selected ? `<button class="workshop-mini workshop-edit" type="button" data-workshop-preview-open>Editar</button>` : ""}
+        ${selected ? `<button class="workshop-mini workshop-edit${editWarningClass}" type="button" data-workshop-preview-open>Editar</button>` : ""}
       </div>
       ${selected ? `
         <div class="workshop-meta">
