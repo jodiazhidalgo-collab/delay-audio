@@ -887,6 +887,7 @@ function renderWorkshopSlot(kind, slot) {
         <div class="workshop-meta">
           ${slot.size ? `<span>${escapeHtml(slot.size)}</span>` : ""}
           ${slot.duration ? `<span>${escapeHtml(slot.duration)}</span>` : ""}
+          ${slot.fps ? `<span>${escapeHtml(slot.fps)}</span>` : ""}
         </div>
         ${renderWorkshopTracks(kind, slot)}
       ` : `<div class="workshop-empty">Elige un video desde una tarjeta.</div>`}
@@ -3084,6 +3085,7 @@ async function selectWorkshopVideo(kind) {
       name: data.name,
       size: data.size || "",
       duration: data.duration || "",
+      fps: data.fps || "",
       date: data.date || "",
       streams,
       audio: defaultWorkshopTrack(kind, streams),
@@ -3134,6 +3136,7 @@ async function loadWorkshopVideoDetails(kind, path) {
     if (info.ok) {
       state[key].size = info.size || state[key].size || "";
       state[key].duration = info.duration || "";
+      state[key].fps = info.fps || "";
       state[key].date = info.date || "";
       state[key].name = info.name || state[key].name || "";
     }

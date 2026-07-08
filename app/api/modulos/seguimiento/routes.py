@@ -2244,6 +2244,7 @@ def seguimiento_item_video(q):
             "size": format_size(st.st_size),
             "mtime": activity_time(st),
             "duration": info.get("duration", ""),
+            "fps": info.get("fps", ""),
             "date": info.get("date", ""),
             "streams": streams.get("streams", []) if streams.get("ok") else [],
             "streams_ok": bool(streams.get("ok")),

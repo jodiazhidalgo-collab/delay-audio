@@ -923,13 +923,17 @@ def info_archivo(path):
         return {"ok": False, "error": error}
     try:
         stat = os.stat(path)
-        duration = duracion_archivo_legible(path)
+        metadata = video_principal_metadata(path)
+        duration = formato_duracion_segundos(metadata.get("duration"))
+        if not duration:
+            duration = duracion_archivo_legible(path)
         return {
             "ok": True,
             "path": path,
             "name": os.path.basename(path),
             "size": formato_size(stat.st_size),
             "duration": duration,
+            "fps": metadata.get("fps", ""),
             "date": datetime.fromtimestamp(stat.st_mtime).strftime("%d/%m/%Y %H:%M"),
         }
     except Exception as exc:
@@ -1610,6 +1614,10 @@ def duracion_archivo_legible(path):
         duration = duracion_video_principal(path)
     except Exception:
         duration = duracion_formato(path)
+    return formato_duracion_segundos(duration)
+
+
+def formato_duracion_segundos(duration):
     if not duration or duration <= 0:
         return ""
     total = int(round(duration))
@@ -1617,6 +1625,69 @@ def duracion_archivo_legible(path):
     minutes = (total % 3600) // 60
     seconds = total % 60
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def video_principal_metadata(path):
+    result = {"duration": 0.0, "fps": ""}
+    p = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration,avg_frame_rate,r_frame_rate:stream_tags=DURATION",
+            "-of",
+            "json",
+            path,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        timeout=60,
+    )
+    if p.returncode != 0:
+        return result
+    try:
+        streams = json.loads(p.stdout or "{}").get("streams") or []
+    except Exception:
+        return result
+    if not streams:
+        return result
+    stream = streams[0]
+    duration = parse_duration_value(stream.get("duration"))
+    if not duration:
+        duration = parse_duration_value((stream.get("tags") or {}).get("DURATION"))
+    fps = parse_frame_rate_value(stream.get("avg_frame_rate"))
+    if not fps:
+        fps = parse_frame_rate_value(stream.get("r_frame_rate"))
+    result["duration"] = float(duration or 0.0)
+    result["fps"] = formato_fps(fps)
+    return result
+
+
+def parse_frame_rate_value(value):
+    text = str(value or "").strip()
+    if not text or text == "0/0":
+        return 0.0
+    try:
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            denominator = float(denominator)
+            if denominator == 0:
+                return 0.0
+            return float(numerator) / denominator
+        return float(text)
+    except Exception:
+        return 0.0
+
+
+def formato_fps(value):
+    if not value or value <= 0:
+        return ""
+    return f"{float(value):.3f} fps"
 
 
 def duracion_video_principal(path):
