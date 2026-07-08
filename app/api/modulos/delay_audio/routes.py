@@ -42,6 +42,7 @@ COMPLETE_MOVIES_PATH = os.environ.get(
 AUDIO_NORMALIZE_THRESHOLD_MS = 500
 AUDIO_FINAL_MAX_FIRST_PACKET_MS = 1000
 AUDIO_DURATION_TOLERANCE_SEC = 1.0
+FPS_CORRECTION_THRESHOLD = 0.0005
 PREVIEW_WINDOW_SEC = 20
 PREVIEW_CLIP_SEC = 85
 PREVIEW_MAX_OFFSET_MS = 60000
@@ -442,6 +443,7 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
 
     cfg = leer_config()
     output_dir = normalizar_ruta(cfg.get("carpeta_salida") or DEFAULT_CONFIG["carpeta_salida"])
+    fps_correction = planificar_correccion_fps(ref, esp)
     with _LOCK:
         existing = job_activo_misma_salida(ref, esp, ref_audio, esp_audio, output_dir, delay_hint_ms)
         if existing:
@@ -479,6 +481,7 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
             "progress_path": os.path.join(job_dir, "progress.json"),
             "returncode": None,
             "error": "",
+            "fps_correction": fps_correction,
         }
         _JOBS[job_id] = job
     diagnostico_init(job, "delay_audio", inputs={
@@ -492,6 +495,7 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
         "confianza_minima": cfg.get("confianza_minima"),
         "carpeta_salida": output_dir,
         "delay_hint_ms": delay_hint_ms,
+        "fps_correction": fps_correction,
     })
     diagnostico_event(job, "validate_inputs", "finished", "Entradas validadas", {
         "video_bueno": ref,
@@ -509,19 +513,27 @@ def _ejecutar_job(job):
     cfg = leer_config()
     profile = limpiar_opcion(cfg.get("perfil", DEFAULT_CONFIG["perfil"]), {"pelicula", "trailer"}, DEFAULT_CONFIG["perfil"])
     job["profile"] = profile
-    cmd = ["python", MOTOR, "--ref", job["ref"], "--esp", job["esp"], "--job-dir", job["job_dir"], "--profile", profile]
-    if job.get("ref_audio") != "":
-        cmd += ["--ref-audio-index", str(job["ref_audio"])]
-    if job.get("esp_audio") != "":
-        cmd += ["--esp-audio-index", str(job["esp_audio"])]
-    if int(job.get("delay_hint_ms") or 0) != 0:
-        cmd += ["--delay-hint-ms", str(int(job.get("delay_hint_ms") or 0))]
+    temp_cleanup_paths = []
     try:
+        fps_correction = job.get("fps_correction") or {}
+        if fps_correction.get("enabled"):
+            preparar_audio_fps_medicion(job, fps_correction, temp_cleanup_paths)
+
+        esp_measure_path = job.get("esp_measure_path") or job["esp"]
+        esp_measure_audio = job.get("esp_measure_audio", job.get("esp_audio"))
+        cmd = ["python", MOTOR, "--ref", job["ref"], "--esp", esp_measure_path, "--job-dir", job["job_dir"], "--profile", profile]
+        if job.get("ref_audio") != "":
+            cmd += ["--ref-audio-index", str(job["ref_audio"])]
+        if esp_measure_audio != "":
+            cmd += ["--esp-audio-index", str(esp_measure_audio)]
+        if int(job.get("delay_hint_ms") or 0) != 0:
+            cmd += ["--delay-hint-ms", str(int(job.get("delay_hint_ms") or 0))]
         diagnostico_update(job, status="running", profile=profile, delay_hint_ms=int(job.get("delay_hint_ms") or 0))
         diagnostico_event(job, "measure_setup", "started", "Arranca motor de medicion", {
             "profile": profile,
             "stdout_log": stdout_path,
             "delay_hint_ms": int(job.get("delay_hint_ms") or 0),
+            "fps_correction": fps_correction,
         })
         started_at = time.time()
         with open(stdout_path, "w", encoding="utf-8") as out:
@@ -531,6 +543,7 @@ def _ejecutar_job(job):
         diagnostico_command(job, "measure_setup", "medir_delay_audio.py", cmd, rc, started_at, leer_tail(stdout_path, 12000), "", rc == 0)
         if rc == 0:
             diagnostico_event(job, "measure_setup", "finished", "Motor de medicion terminado OK", {"returncode": rc})
+            anexar_correccion_fps_resultado(job)
             exportar_si_corresponde(job)
             job["status"] = "done"
             diagnostico_finish(job, "done", leer_json(job["result_path"]) or {})
@@ -549,6 +562,10 @@ def _ejecutar_job(job):
                 f.write(f"ERROR API: {exc}\n")
         except Exception:
             pass
+    finally:
+        for path in temp_cleanup_paths:
+            diagnostico_event(job, "cleanup", "remove_temp", "Eliminando temporal propio", {"path": path})
+            limpiar_archivo_silencioso(path)
 
 
 def exportar_si_corresponde(job):
@@ -610,13 +627,24 @@ def exportar_si_corresponde(job):
     published_output = False
     try:
         diagnostico_event(job, "normalize_audio", "started", "Preparando audio espanol", {"delay_ms": delay_ms})
-        audio_track_id = mkvmerge_track_id_for_ffprobe_index(job["esp"], job["esp_audio"], "audio")
-        audio_input = preparar_audio_espanol_exportacion(job, audio_track_id, delay_ms, video_duration, temp_cleanup_paths)
+        audio_source_path = job.get("fps_audio_path") or job["esp"]
+        audio_source_index = job.get("fps_audio_index", job.get("esp_audio"))
+        audio_track_id = mkvmerge_track_id_for_ffprobe_index(audio_source_path, audio_source_index, "audio")
+        audio_input = preparar_audio_espanol_exportacion(
+            job,
+            audio_track_id,
+            delay_ms,
+            video_duration,
+            temp_cleanup_paths,
+            source_path=audio_source_path,
+            source_audio=audio_source_index,
+        )
         diagnostico_event(job, "normalize_audio", "finished", "Audio espanol preparado", {
             "normalized": audio_input.get("normalized"),
             "track_id": audio_input.get("track_id"),
             "sync_ms": audio_input.get("sync_ms"),
             "path": audio_input.get("path"),
+            "fps_corrected": bool(job.get("fps_audio_path")),
         })
         cmd = [
             "mkvmerge",
@@ -1168,6 +1196,8 @@ def leer_progreso(job, status, rows, result):
     if isinstance(progress, dict) and "percent" in progress:
         return progress
     if status == "running":
+        if (job.get("fps_correction") or {}).get("enabled") and not rows and not result:
+            return {"phase": "fps", "percent": 0, "label": "FPS"}
         export_status = (result or {}).get("export", {}).get("status")
         if export_status == "running":
             return {"phase": "export", "percent": 0, "label": "Exportando"}
@@ -1227,8 +1257,229 @@ def limpiar_archivo_silencioso(path):
         pass
 
 
-def preparar_audio_espanol_exportacion(job, audio_track_id, delay_ms, video_duration, temp_cleanup_paths):
-    first_packet_ms = primer_packet_audio_ms(job["esp"], job["esp_audio"])
+def planificar_correccion_fps(ref, esp):
+    ref_meta = video_principal_metadata(ref)
+    esp_meta = video_principal_metadata(esp)
+    ref_fps = float(ref_meta.get("fps_value") or 0.0)
+    esp_fps = float(esp_meta.get("fps_value") or 0.0)
+    if not ref_fps or not esp_fps:
+        return {"enabled": False, "reason": "fps_no_detectado"}
+    if abs(round(ref_fps, 3) - round(esp_fps, 3)) <= FPS_CORRECTION_THRESHOLD:
+        return {
+            "enabled": False,
+            "reason": "fps_iguales",
+            "ref_fps": round(ref_fps, 6),
+            "esp_fps": round(esp_fps, 6),
+        }
+    tempo = ref_fps / esp_fps
+    if not tempo or tempo <= 0:
+        return {"enabled": False, "reason": "tempo_no_valido"}
+    return {
+        "enabled": True,
+        "ref_fps": round(ref_fps, 6),
+        "esp_fps": round(esp_fps, 6),
+        "tempo": round(tempo, 9),
+        "ref_label": formato_fps(ref_fps),
+        "esp_label": formato_fps(esp_fps),
+    }
+
+
+def preparar_audio_fps_medicion(job, fps_correction, temp_cleanup_paths):
+    tempo = float(fps_correction.get("tempo") or 0.0)
+    if not tempo or tempo <= 0:
+        raise RuntimeError("Correccion FPS no valida.")
+    temp_audio_path = ruta_temporal_audio_fps(job)
+    temp_cleanup_paths.append(temp_audio_path)
+    source_duration = duracion_audio_stream(job["esp"], job["esp_audio"])
+    if not source_duration or source_duration <= 0:
+        source_duration = duracion_formato(job["esp"])
+    target_duration = float(source_duration or 0.0) / tempo if tempo else 0.0
+
+    log_job(job, f"FPS: corrigiendo audio espanol {fps_correction.get('esp_label')} -> {fps_correction.get('ref_label')}")
+    log_job(job, f"FPS: factor atempo {tempo:.9f}")
+    escribir_progreso(job, "fps", 0, "FPS")
+    diagnostico_event(job, "fps_correction", "started", "Corrigiendo FPS del audio espanol", {
+        "ref_fps": fps_correction.get("ref_fps"),
+        "esp_fps": fps_correction.get("esp_fps"),
+        "tempo": tempo,
+        "source_duration": source_duration,
+        "target_duration": target_duration,
+    })
+
+    filter_parts = atempo_filter_chain(tempo)
+    filter_parts.append("aresample=async=1:first_pts=0")
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-hide_banner",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        job["esp"],
+        "-map",
+        f"0:{int(job['esp_audio'])}",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-af",
+        ",".join(filter_parts),
+        "-c:a",
+        "ac3",
+        "-b:a",
+        "640k",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        temp_audio_path,
+    ]
+    started_at = time.time()
+    returncode, output_tail = ejecutar_ffmpeg_fps_con_progreso(cmd, job, target_duration)
+    diagnostico_command(job, "fps_correction", "ffmpeg_fps_audio", cmd, returncode, started_at, output_tail, "", returncode == 0)
+    if returncode != 0:
+        raise RuntimeError((output_tail or "ffmpeg fallo corrigiendo FPS del audio").strip()[-500:])
+    if not os.path.isfile(temp_audio_path) or os.path.getsize(temp_audio_path) <= 4096:
+        raise RuntimeError("El audio corregido por FPS esta vacio.")
+    first_packet_ms = primer_packet_audio_ms(temp_audio_path, "a:0")
+    if first_packet_ms is None:
+        raise RuntimeError("No he podido validar el audio corregido por FPS.")
+    if first_packet_ms > AUDIO_FINAL_MAX_FIRST_PACKET_MS:
+        raise RuntimeError(f"Audio FPS no valido: empieza en {first_packet_ms:.0f} ms.")
+    validar_duracion_audio_fps(temp_audio_path, target_duration)
+    escribir_progreso(job, "fps", 100, "FPS")
+    job["fps_audio_path"] = temp_audio_path
+    job["fps_audio_index"] = 0
+    job["esp_measure_path"] = temp_audio_path
+    job["esp_measure_audio"] = 0
+    diagnostico_event(job, "fps_correction", "finished", "Audio FPS preparado", {
+        "path": temp_audio_path,
+        "tempo": tempo,
+    })
+
+
+def ruta_temporal_audio_fps(job):
+    directory = os.path.join(job["job_dir"], "fps")
+    os.makedirs(directory, exist_ok=True)
+    for _ in range(20):
+        candidate = os.path.join(directory, f"audio_espanol_fps_{uuid.uuid4().hex[:8]}.mka")
+        if not os.path.exists(candidate):
+            return candidate
+    raise RuntimeError("No he podido crear un temporal de FPS libre.")
+
+
+def atempo_filter_chain(tempo):
+    value = float(tempo)
+    parts = []
+    while value < 0.5:
+        parts.append("atempo=0.5")
+        value /= 0.5
+    while value > 2.0:
+        parts.append("atempo=2.0")
+        value /= 2.0
+    parts.append(f"atempo={value:.9f}")
+    return parts
+
+
+def ejecutar_ffmpeg_fps_con_progreso(cmd, job, target_duration):
+    output_tail = []
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        bufsize=1,
+    )
+    deadline = time.time() + 21600
+    last_percent = -1
+    while True:
+        if process.stdout is None:
+            break
+        if time.time() > deadline:
+            process.kill()
+            raise subprocess.TimeoutExpired(cmd, 21600)
+        if process.poll() is not None:
+            tail = process.stdout.read()
+            if tail:
+                for line in tail.splitlines():
+                    output_tail.append(line)
+                    last_percent = procesar_linea_ffmpeg_fps(line, job, last_percent, target_duration)
+            break
+        readable, _, _ = select.select([process.stdout], [], [], 0.5)
+        if not readable:
+            continue
+        line = process.stdout.readline()
+        if line:
+            output_tail.append(line)
+            last_percent = procesar_linea_ffmpeg_fps(line, job, last_percent, target_duration)
+    returncode = process.wait()
+    if returncode == 0:
+        escribir_progreso(job, "fps", 100, "FPS")
+    return returncode, "\n".join(output_tail[-80:])
+
+
+def procesar_linea_ffmpeg_fps(line, job, last_percent, target_duration):
+    text = str(line or "").strip()
+    if not text:
+        return last_percent
+    if "=" not in text:
+        log_job(job, text)
+        return last_percent
+    key, value = text.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    seconds = None
+    if key in {"out_time_ms", "out_time_us"}:
+        try:
+            seconds = float(value) / 1000000.0
+        except Exception:
+            seconds = None
+    elif key == "out_time":
+        seconds = parse_duration_value(value)
+    elif key == "progress" and value == "end":
+        escribir_progreso(job, "fps", 100, "FPS")
+        return 100
+    if seconds is None or not target_duration or target_duration <= 0:
+        return last_percent
+    percent = max(0, min(100, int(round((seconds / float(target_duration)) * 100))))
+    if percent != last_percent:
+        escribir_progreso(job, "fps", percent, "FPS")
+    return percent
+
+
+def validar_duracion_audio_fps(temp_audio_path, target_duration):
+    if not target_duration or target_duration <= 0:
+        return
+    audio_duration = duracion_audio_stream(temp_audio_path, "a:0")
+    if not audio_duration or audio_duration <= 0:
+        raise RuntimeError("No he podido validar la duracion del audio FPS.")
+    tolerance = max(2.0, min(15.0, float(target_duration) * 0.01))
+    if abs(float(audio_duration) - float(target_duration)) > tolerance:
+        raise RuntimeError(
+            f"Audio FPS no valido: esperado {target_duration:.3f}s, generado {audio_duration:.3f}s."
+        )
+
+
+def anexar_correccion_fps_resultado(job):
+    fps_correction = job.get("fps_correction") or {}
+    if not fps_correction.get("enabled"):
+        return
+    result = leer_json(job["result_path"]) or {}
+    if not isinstance(result, dict) or not result.get("ok"):
+        return
+    result["fps_correction"] = {
+        "enabled": True,
+        "ref_fps": fps_correction.get("ref_fps"),
+        "esp_fps": fps_correction.get("esp_fps"),
+        "tempo": fps_correction.get("tempo"),
+    }
+    escribir_json(job["result_path"], result)
+
+
+def preparar_audio_espanol_exportacion(job, audio_track_id, delay_ms, video_duration, temp_cleanup_paths, source_path=None, source_audio=None):
+    source_path = source_path or job["esp"]
+    source_audio = job.get("esp_audio") if source_audio is None else source_audio
+    first_packet_ms = primer_packet_audio_ms(source_path, source_audio)
     if first_packet_ms is None:
         raise RuntimeError("No he podido leer el primer paquete de audio espanol.")
 
@@ -1242,7 +1493,7 @@ def preparar_audio_espanol_exportacion(job, audio_track_id, delay_ms, video_dura
     )
     if not needs_normalize:
         return {
-            "path": job["esp"],
+            "path": source_path,
             "track_id": audio_track_id,
             "sync_ms": delay_ms,
             "normalized": False,
@@ -1264,7 +1515,7 @@ def preparar_audio_espanol_exportacion(job, audio_track_id, delay_ms, video_dura
     escribir_progreso(job, "export", 1, "Preparando audio")
     temp_audio_path = ruta_temporal_audio(job)
     temp_cleanup_paths.append(temp_audio_path)
-    crear_audio_espanol_normalizado(job, temp_audio_path, delay_ms, video_duration)
+    crear_audio_espanol_normalizado(job, temp_audio_path, delay_ms, video_duration, source_path=source_path, source_audio=source_audio)
     first_normalized_ms = primer_packet_audio_ms(temp_audio_path, "a:0")
     if first_normalized_ms is None:
         raise RuntimeError("No he podido validar el audio normalizado.")
@@ -1292,7 +1543,9 @@ def ruta_temporal_audio(job):
     raise RuntimeError("No he podido crear un temporal de audio libre.")
 
 
-def crear_audio_espanol_normalizado(job, temp_audio_path, delay_ms, video_duration):
+def crear_audio_espanol_normalizado(job, temp_audio_path, delay_ms, video_duration, source_path=None, source_audio=None):
+    source_path = source_path or job["esp"]
+    source_audio = job.get("esp_audio") if source_audio is None else source_audio
     filter_parts = ["aresample=async=1:first_pts=0"]
     if delay_ms > AUDIO_NORMALIZE_THRESHOLD_MS:
         filter_parts.append(f"adelay={delay_ms}:all=1")
@@ -1309,9 +1562,9 @@ def crear_audio_espanol_normalizado(job, temp_audio_path, delay_ms, video_durati
         "-loglevel",
         "error",
         "-i",
-        job["esp"],
+        source_path,
         "-map",
-        f"0:{int(job['esp_audio'])}",
+        f"0:{int(source_audio)}",
         "-vn",
         "-sn",
         "-dn",
@@ -1628,7 +1881,7 @@ def formato_duracion_segundos(duration):
 
 
 def video_principal_metadata(path):
-    result = {"duration": 0.0, "fps": ""}
+    result = {"duration": 0.0, "fps": "", "fps_value": 0.0}
     p = subprocess.run(
         [
             "ffprobe",
@@ -1664,6 +1917,7 @@ def video_principal_metadata(path):
     if not fps:
         fps = parse_frame_rate_value(stream.get("r_frame_rate"))
     result["duration"] = float(duration or 0.0)
+    result["fps_value"] = float(fps or 0.0)
     result["fps"] = formato_fps(fps)
     return result
 

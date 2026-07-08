@@ -2020,6 +2020,7 @@ button.watch-chevron {
 }
 
 .workshop-progress.is-starting .workshop-progress-label span,
+.workshop-progress.is-fps .workshop-progress-label span,
 .workshop-progress.is-measure .workshop-progress-label span,
 .workshop-progress.is-export .workshop-progress-label span,
 .workshop-progress.is-audio .workshop-progress-label span,
@@ -2042,6 +2043,16 @@ button.watch-chevron {
 .workshop-progress.is-export {
   border-color: rgba(132, 210, 255, .34);
   background: linear-gradient(145deg, rgba(22, 58, 82, .72), rgba(7, 18, 29, .78));
+}
+
+.workshop-progress.is-fps {
+  border-color: rgba(255, 123, 123, .34);
+  background: linear-gradient(145deg, rgba(91, 28, 36, .74), rgba(30, 10, 16, .78));
+}
+
+.workshop-progress.is-fps .workshop-progress-label span {
+  background: #ff8b8b;
+  box-shadow: 0 0 12px rgba(255, 123, 123, .56);
 }
 
 .workshop-progress.is-error {
@@ -2727,6 +2738,12 @@ button.watch-chevron {
   border: 1px solid rgba(177, 211, 154, .42);
   background: linear-gradient(180deg, rgba(39, 64, 32, .96), rgba(27, 46, 23, .96));
   color: #effbe9;
+}
+
+.workshop-run.is-fps-action {
+  border-color: rgba(255, 123, 123, .42);
+  background: linear-gradient(180deg, rgba(112, 31, 39, .96), rgba(73, 20, 28, .96));
+  color: #fff2f2;
 }
 
 .workshop-run:disabled {

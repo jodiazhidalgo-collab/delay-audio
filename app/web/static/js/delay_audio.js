@@ -1127,6 +1127,7 @@ function workshopProgressInfo(state) {
   percent = Math.max(0, Math.min(100, Math.round(percent)));
   const labels = {
     starting: "Inicio",
+    fps: "FPS",
     measure: "Midiendo",
     export: "Exportando",
     done: "Listo",
@@ -1178,7 +1179,7 @@ function renderHeaderWorkshop() {
 
 function renderWorkshopProgressMarker(state) {
   const info = workshopProgressInfo(state);
-  if (!info || state.status !== "running" || info.phase !== "export") return "";
+  if (!info || state.status !== "running" || !["fps", "export"].includes(info.phase)) return "";
   return `
     <div class="workshop-progress is-${escapeHtml(info.phase)}" aria-live="polite">
       <div class="workshop-progress-label"><span></span>${escapeHtml(info.label)}</div>
@@ -1189,6 +1190,8 @@ function renderWorkshopProgressMarker(state) {
 
 function renderWorkshopLiveMarker(state) {
   if (state.status !== "running") return "";
+  const progressPhase = String(state.progress?.phase || "").toLowerCase();
+  if (progressPhase === "fps") return "";
   const rows = Array.isArray(state.rows) ? state.rows : [];
   const lastRow = rows.length ? rows[rows.length - 1] : null;
   const result = state.result || null;
@@ -1281,18 +1284,35 @@ function renderWorkshopResult(state) {
   `;
 }
 
+function workshopActionInfo(settings, alerts, state) {
+  if (workshopBusy || state.status === "running") {
+    return { text: "Trabajando", className: "" };
+  }
+  const exporting = settings.modo !== "medir";
+  if (alerts?.fpsMismatch) {
+    return {
+      text: exporting ? "Corregir FPS, medir y exportar" : "Corregir FPS y medir",
+      className: " is-fps-action"
+    };
+  }
+  return {
+    text: exporting ? "Medir y exportar" : "Solo medir",
+    className: ""
+  };
+}
+
 function renderWorkshop() {
   const state = readWorkshopState();
   const settings = workshopSettings(state);
-  const actionText = settings.modo === "exportar" ? "Medir y exportar" : "Solo medir";
   const alerts = workshopMetaAlerts(state);
+  const action = workshopActionInfo(settings, alerts, state);
   return `
     <div class="workshop">
       ${renderWorkshopSlot("ref", state.ref, alerts)}
       ${renderWorkshopSlot("esp", state.esp, alerts)}
       ${renderWorkshopDelayHint(state)}
       <div class="workshop-actions">
-        <button class="workshop-run" type="button" data-workshop-run ${!workshopReady(state) || workshopBusy ? "disabled" : ""}>${workshopBusy || state.status === "running" ? "Trabajando" : escapeHtml(actionText)}</button>
+        <button class="workshop-run${escapeHtml(action.className)}" type="button" data-workshop-run ${!workshopReady(state) || workshopBusy ? "disabled" : ""}>${escapeHtml(action.text)}</button>
       </div>
       ${renderWorkshopSettings(settings)}
       ${renderWorkshopResult(state)}
@@ -3529,13 +3549,16 @@ async function runWorkshop() {
     statusText.textContent = "Faltan videos o pistas";
     return;
   }
+  const needsFpsCorrection = workshopMetaAlerts(state).fpsMismatch;
 
   workshopBusy = true;
   prepareFinishSound();
   state.status = "running";
   state.result = null;
   state.rows = [];
-  state.progress = { phase: "starting", percent: 0, label: "Inicio" };
+  state.progress = needsFpsCorrection
+    ? { phase: "fps", percent: 0, label: "FPS" }
+    : { phase: "starting", percent: 0, label: "Inicio" };
   state.error = "";
   saveWorkshopState(state);
   render(lastData);
@@ -3563,9 +3586,11 @@ async function runWorkshop() {
     nextState.status = "running";
     nextState.result = null;
     nextState.rows = [];
-    nextState.progress = { phase: "measure", percent: 0, label: "Midiendo" };
+    nextState.progress = needsFpsCorrection
+      ? { phase: "fps", percent: 0, label: "FPS" }
+      : { phase: "measure", percent: 0, label: "Midiendo" };
     saveWorkshopState(nextState);
-    statusText.textContent = "Taller midiendo";
+    statusText.textContent = needsFpsCorrection ? "Taller corrigiendo FPS" : "Taller midiendo";
     startWorkshopPolling();
   } catch (error) {
     const nextState = readWorkshopState();

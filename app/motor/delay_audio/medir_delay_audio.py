@@ -24,6 +24,7 @@ CLUSTER_TOLERANCE_MS = 700
 HINT_SEARCH_RADIUS_MS = 12000
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".ts", ".mov", ".wmv"}
+AUDIO_EXTENSIONS = {".mka", ".m4a", ".aac", ".ac3", ".eac3", ".dts", ".flac", ".mp3", ".wav", ".ogg", ".opus"}
 
 
 class DelayAudio:
@@ -442,7 +443,7 @@ class DelayAudio:
             self.log(f"VIDEO BUENO: {self.ref_file}")
             self.log(f"VIDEO ESPANOL: {self.esp_file}")
             validate_video(self.ref_file)
-            validate_video(self.esp_file)
+            validate_video(self.esp_file, allow_audio=True)
             self.diag.event("validate_inputs", "finished", "Entradas validas")
 
             self.diag.event("probe_ref", "started", "Leyendo duracion del video bueno", {"path": self.ref_file})
@@ -583,11 +584,11 @@ def format_time_simple(seconds):
     return f"{hour:02d}:{minute:02d}:{sec:02d}"
 
 
-def validate_video(path):
+def validate_video(path, allow_audio=False):
     if not os.path.isfile(path):
         raise RuntimeError(f"No existe el archivo: {path}")
     ext = os.path.splitext(path)[1].lower()
-    if ext not in VIDEO_EXTENSIONS:
+    if ext not in VIDEO_EXTENSIONS and not (allow_audio and ext in AUDIO_EXTENSIONS):
         raise RuntimeError(f"Extension no soportada: {ext}")
 
 
