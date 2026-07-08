@@ -1426,7 +1426,7 @@ def media_move_label(parts):
     return "Media" if not parts else "/".join(parts)
 
 
-def media_move_folder_items(root):
+def media_move_folder_items(root, by_activity=True):
     items = []
     try:
         entries = []
@@ -1438,11 +1438,14 @@ def media_move_folder_items(root):
                     continue
                 path = Path(entry.path)
                 st = entry.stat(follow_symlinks=False)
-                entries.append((normalize_search_text(entry.name), entry.name, st))
+                entries.append((activity_time(st), normalize_search_text(entry.name), entry.name, st))
             except OSError as exc:
                 log_error(f"No se pudo leer carpeta destino {entry.path}: {exc}")
-        entries.sort(key=lambda row: row[0])
-        for _, name, st in entries:
+        if by_activity:
+            entries.sort(key=lambda row: (-row[0], row[1]))
+        else:
+            entries.sort(key=lambda row: row[1])
+        for _, _, name, st in entries:
             items.append({
                 "name": name,
                 "mtime": activity_time(st),
@@ -2085,7 +2088,7 @@ def seguimiento_move_browse(q):
     if error:
         return {"ok": False, "items": [], "parts": clean_parts, "error": error}
 
-    items = media_move_folder_items(folder)
+    items = media_move_folder_items(folder, by_activity=bool(clean_parts))
     return {
         "ok": True,
         "root": str(MEDIA_MOVE_ROOT),
