@@ -2626,6 +2626,18 @@ button.watch-chevron {
   font-weight: 800;
 }
 
+.workshop-meta span.is-duration-warning {
+  background: rgba(232, 171, 45, .28);
+  color: #ffe8a6;
+  box-shadow: inset 0 0 0 1px rgba(255, 200, 79, .34);
+}
+
+.workshop-meta span.is-fps-mismatch {
+  background: rgba(211, 62, 62, .32);
+  color: #ffd6d6;
+  box-shadow: inset 0 0 0 1px rgba(255, 105, 105, .36);
+}
+
 .workshop-empty,
 .workshop-muted,
 .workshop-error,

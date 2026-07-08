@@ -871,7 +871,51 @@ function renderWorkshopTracks(kind, slot) {
   `;
 }
 
-function renderWorkshopSlot(kind, slot) {
+function parseWorkshopDurationSeconds(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const parts = text.split(":").map((part) => Number(part));
+  if (parts.length === 3 && parts.every(Number.isFinite)) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+  if (parts.length === 2 && parts.every(Number.isFinite)) {
+    return parts[0] * 60 + parts[1];
+  }
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function normalizeWorkshopFps(value) {
+  const match = String(value || "").replace(",", ".").match(/\d+(?:\.\d+)?/);
+  if (!match) return "";
+  const fps = Number(match[0]);
+  return Number.isFinite(fps) && fps > 0 ? fps.toFixed(3) : "";
+}
+
+function workshopMetaAlerts(state) {
+  const refFps = normalizeWorkshopFps(state?.ref?.fps);
+  const espFps = normalizeWorkshopFps(state?.esp?.fps);
+  const refDuration = parseWorkshopDurationSeconds(state?.ref?.duration);
+  const espDuration = parseWorkshopDurationSeconds(state?.esp?.duration);
+  return {
+    fpsMismatch: Boolean(refFps && espFps && refFps !== espFps),
+    durationWarning: refDuration !== null && espDuration !== null && Math.abs(refDuration - espDuration) >= 10
+  };
+}
+
+function workshopMetaClass(type, alerts) {
+  if (type === "duration" && alerts?.durationWarning) return " is-duration-warning";
+  if (type === "fps" && alerts?.fpsMismatch) return " is-fps-mismatch";
+  return "";
+}
+
+function renderWorkshopMetaPill(value, type, alerts) {
+  if (!value) return "";
+  const className = workshopMetaClass(type, alerts).trim();
+  return `<span${className ? ` class="${className}"` : ""}>${escapeHtml(value)}</span>`;
+}
+
+function renderWorkshopSlot(kind, slot, alerts = {}) {
   const selected = Boolean(slot?.path);
   const label = workshopSlotLabel(kind);
   return `
@@ -886,8 +930,8 @@ function renderWorkshopSlot(kind, slot) {
       ${selected ? `
         <div class="workshop-meta">
           ${slot.size ? `<span>${escapeHtml(slot.size)}</span>` : ""}
-          ${slot.duration ? `<span>${escapeHtml(slot.duration)}</span>` : ""}
-          ${slot.fps ? `<span>${escapeHtml(slot.fps)}</span>` : ""}
+          ${renderWorkshopMetaPill(slot.duration, "duration", alerts)}
+          ${renderWorkshopMetaPill(slot.fps, "fps", alerts)}
         </div>
         ${renderWorkshopTracks(kind, slot)}
       ` : `<div class="workshop-empty">Elige un video desde una tarjeta.</div>`}
@@ -1241,10 +1285,11 @@ function renderWorkshop() {
   const state = readWorkshopState();
   const settings = workshopSettings(state);
   const actionText = settings.modo === "exportar" ? "Medir y exportar" : "Solo medir";
+  const alerts = workshopMetaAlerts(state);
   return `
     <div class="workshop">
-      ${renderWorkshopSlot("ref", state.ref)}
-      ${renderWorkshopSlot("esp", state.esp)}
+      ${renderWorkshopSlot("ref", state.ref, alerts)}
+      ${renderWorkshopSlot("esp", state.esp, alerts)}
       ${renderWorkshopDelayHint(state)}
       <div class="workshop-actions">
         <button class="workshop-run" type="button" data-workshop-run ${!workshopReady(state) || workshopBusy ? "disabled" : ""}>${workshopBusy || state.status === "running" ? "Trabajando" : escapeHtml(actionText)}</button>
