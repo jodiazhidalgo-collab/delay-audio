@@ -9,6 +9,8 @@ description: Cerrar Git de delay audio al finalizar cada turno que haya modifica
 
 Usar al finalizar cada turno que haya modificado archivos en `delay audio`, salvo que el usuario diga que no cierre Git todavia.
 
+No usar en turnos de solo lectura, revision o explicacion sin archivos modificados.
+
 ## Flujo
 
 1. Confirmar que estas en la raiz del proyecto.
@@ -24,6 +26,14 @@ Usar al finalizar cada turno que haya modificado archivos en `delay audio`, salv
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .agents\skills\cerrar-git-delay-audio\scripts\close_git.ps1 -Message "mensaje corto"
 ```
+
+## Pruebas sinteticas
+
+- No crear repositorios de prueba en trabajos normales de web, motor, AGENTS, documentacion u otros archivos.
+- Probar el bucle Git solo al modificar `close_git.ps1`, esta skill o `clean_residues.ps1`.
+- Crear la prueba exclusivamente en `_codex_runtime/test-data/` y eliminarla al terminar.
+- Si Git bloquea la prueba por `dubious ownership`, usar una configuracion temporal limitada al proceso o al repositorio sintetico.
+- No usar `safe.directory=*`, no cambiar la proteccion global y no eliminar las excepciones exactas necesarias para los repositorios reales del NAS.
 
 ## Reglas
 

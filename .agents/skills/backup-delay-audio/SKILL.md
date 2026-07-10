@@ -5,6 +5,12 @@ description: Crear backups fechados de delay audio antes de cambios delicados. U
 
 # Backup delay audio
 
+## Cuando usarla
+
+Usar solo antes de cambios delicados: AGENTS, `.codex`, skills, frontend, backend, motor, Docker, configuracion funcional o cuando el usuario espere un salvavidas local.
+
+No usar en turnos de solo lectura ni para cambios triviales faciles de revertir.
+
 ## Flujo
 
 1. Identificar que archivos o carpetas se van a tocar.

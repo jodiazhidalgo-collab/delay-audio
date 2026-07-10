@@ -27,9 +27,11 @@ Antes de tocar `Taller`, lee `docs/taller-delay-audio.md`. Si cambias su comport
 
 ## Flujo obligatorio
 
+Si el turno es solo de lectura, revision o explicacion y no se modifica ningun archivo, limitate a leer, comprobar y responder. No crees backups, temporales, capturas, artefactos, repositorios sinteticos ni otros archivos; no ejecutes limpieza, commit, push ni pruebas visuales que escriban resultados.
+
 1. Antes de editar, ejecuta `git status --short`.
 2. Si hay cambios previos, avisa antes de tocar nada y no los presentes como propios.
-3. Antes de editar AGENTS, `.codex`, skills, frontend, backend, motor, Docker o configuracion funcional, usa `backup-delay-audio`.
+3. Usa `backup-delay-audio` solo antes de cambios delicados: AGENTS, `.codex`, skills, frontend, backend, motor, Docker, configuracion funcional o cuando el usuario espere un salvavidas local. No hagas backup para cambios triviales faciles de revertir.
 4. Para fallos de jobs, medicion, exportacion, preview o Seguimiento, usa primero `blackbox-review-delay-audio`.
 5. Tras cambios en web, frontend, backend, motor, Docker o configuracion funcional, usa `rebuild-delay-audio`.
 6. Tras cambios visibles, usa `playwright-ui-check-delay-audio` y valida el flujo afectado en la web real.
@@ -40,6 +42,7 @@ Antes de tocar `Taller`, lee `docs/taller-delay-audio.md`. Si cambias su comport
 - No inicialices Git ni configures remotos nuevos. Si no hay repo o remoto, indicalo sin inventar nada.
 - `AGENTS.md` y `.agents/skills/` son parte publica del flujo y deben ir a Git. `.codex/` sigue siendo configuracion local.
 - Guarda pruebas sinteticas y artefactos en `_codex_runtime/`. No metas pruebas falsas en `logs/` ni `config/`.
+- No repitas pruebas sinteticas del bucle Git en trabajos normales. Ejecutalas solo al modificar `close_git.ps1`, la skill `cerrar-git-delay-audio` o `clean_residues.ps1`, siguiendo sus reglas y eliminando despues sus artefactos.
 - Respeta `.gitignore` y no fuerces al commit backups, runtime, logs, credenciales ni residuos.
 
 ## Arquitectura

@@ -9,6 +9,8 @@ description: Limpiar residuos seguros de Codex y pruebas en delay audio. Crea y 
 
 Usar dentro del cierre final de `cerrar-git-delay-audio`.
 
+No usar en turnos de solo lectura, revision o explicacion sin archivos modificados.
+
 ## Zonas
 
 `logs/` y `config/` son sagrados: contienen runtime real.
