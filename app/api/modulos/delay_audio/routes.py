@@ -669,7 +669,8 @@ def confirmar_plan_fps(job, fps_plan, profile):
         raise RuntimeError("La confirmación FPS devolvió un resultado inválido")
     result = dict(fps_plan)
     result.update(confirmation)
-    result["enabled"] = bool(result.get("confirmed"))
+    result["confirmed"] = confirmation.get("confirmed") is True
+    result["enabled"] = result["confirmed"]
     result["applied"] = False
     event_name = "confirmed" if result.get("confirmed") else "rejected"
     diagnostico_event(job, "fps_plan", event_name, "Plan FPS confirmado" if result.get("confirmed") else "Plan FPS rechazado", {

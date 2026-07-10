@@ -1,6 +1,8 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -10,7 +12,8 @@ for path in (APP_ROOT, MOTOR_ROOT):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from api.modulos.delay_audio.routes import hybrid_enabled, resultado_fps_no_confirmados  # noqa: E402
+from api.modulos.delay_audio import routes as routes_module  # noqa: E402
+from api.modulos.delay_audio.routes import confirmar_plan_fps, hybrid_enabled, resultado_fps_no_confirmados  # noqa: E402
 from medir_delay_audio import DelayAudio  # noqa: E402
 
 
@@ -52,6 +55,26 @@ class RouteSeparationTests(unittest.TestCase):
         self.assertTrue(motor.esp_video_original.endswith("video-original.mkv"))
         self.assertNotEqual(motor.esp_file, motor.esp_video_original)
         self.assertTrue(motor.fps_plan_confirmed)
+
+    def test_fps_confirmation_only_accepts_literal_boolean_true(self):
+        job = {"ref": "ref.mkv", "esp": "esp.mkv", "esp_video_original": "esp.mkv"}
+        proc = SimpleNamespace(
+            returncode=0,
+            stdout='{"confirmed": "true", "reason": "invalid_contract"}',
+            stderr="",
+        )
+        with (
+            patch.object(routes_module.subprocess, "run", return_value=proc),
+            patch.object(routes_module, "diagnostico_event"),
+            patch.object(routes_module, "diagnostico_command"),
+        ):
+            result = confirmar_plan_fps(
+                job,
+                {"planned": True, "enabled": True, "ref_fps": 23.976, "esp_fps": 24.0, "tempo": 0.999},
+                "pelicula",
+            )
+        self.assertIs(result["confirmed"], False)
+        self.assertIs(result["enabled"], False)
 
 
 if __name__ == "__main__":
