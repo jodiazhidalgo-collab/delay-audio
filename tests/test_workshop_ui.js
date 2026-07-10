@@ -1,0 +1,219 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const projectRoot = path.resolve(__dirname, "..");
+const source = fs.readFileSync(
+  path.join(projectRoot, "app", "web", "static", "js", "delay_audio.js"),
+  "utf8"
+);
+
+function element() {
+  const classList = {
+    add() {},
+    remove() {},
+    toggle() {},
+    contains() { return false; }
+  };
+  return {
+    classList,
+    addEventListener() {},
+    setAttribute() {},
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    closest() { return { classList }; },
+    textContent: "",
+    innerHTML: "",
+    disabled: false
+  };
+}
+
+function createHarness() {
+  const values = new Map([
+    ["delay-audio-active-tab", "taller"]
+  ]);
+  const localStorage = {
+    getItem(key) { return values.has(key) ? values.get(key) : null; },
+    setItem(key, value) { values.set(key, String(value)); },
+    removeItem(key) { values.delete(key); }
+  };
+  const elements = {
+    folders: element(),
+    statusText: element(),
+    refreshButton: element(),
+    headerWorkshopCluster: element()
+  };
+  const document = {
+    hidden: false,
+    activeElement: null,
+    body: { appendChild() {} },
+    getElementById(id) { return elements[id] || null; },
+    createElement() { return element(); },
+    addEventListener() {}
+  };
+  const never = new Promise(() => {});
+  const context = {
+    console,
+    document,
+    localStorage,
+    URLSearchParams,
+    CSS: { escape: (value) => String(value) },
+    fetch: () => never,
+    setInterval: () => ({ timer: true }),
+    clearInterval() {},
+    setTimeout: () => ({ timer: true }),
+    clearTimeout() {},
+    window: {
+      DelayAudioConfig: {},
+      setInterval: () => ({ timer: true }),
+      clearInterval() {},
+      setTimeout: () => ({ timer: true }),
+      clearTimeout() {}
+    }
+  };
+  vm.createContext(context);
+  vm.runInContext(source, context, { filename: "delay_audio.js" });
+  return {
+    context,
+    elements,
+    getState() {
+      return JSON.parse(localStorage.getItem("delay-audio-workshop-state") || "{}");
+    },
+    setState(state) {
+      localStorage.setItem("delay-audio-workshop-state", JSON.stringify(state));
+    },
+    evaluate(code) {
+      return vm.runInContext(code, context);
+    }
+  };
+}
+
+function response(data, ok = true) {
+  return { ok, status: ok ? 200 : 500, async json() { return data; } };
+}
+
+async function main() {
+  const harness = createHarness();
+
+  harness.setState({
+    status: "done",
+    requested_mode: "medir",
+    result: {
+      ok: true,
+      delay_ms: 96540,
+      confidence: "MEDIA",
+      zones_count: 1,
+      avg_score: 0.4883274785,
+      profile: "pelicula"
+    },
+    rows: [{
+      zona: "6",
+      inicio: "00:12:00",
+      delay: "96540",
+      confianza: "MEDIA",
+      pista_video: "0:1",
+      pista_espanol: "0:2"
+    }]
+  });
+  const legacyHtml = harness.evaluate("renderWorkshopResult(readWorkshopState())");
+  assert.match(legacyHtml, /96540 ms/);
+  assert.match(legacyHtml, /MEDIA/);
+  assert.match(legacyHtml, /00:12:00/);
+  assert.doesNotMatch(legacyHtml, /Resultado híbrido/);
+
+  harness.setState({
+    status: "running",
+    job: "job-overlap",
+    rows: [],
+    result: null
+  });
+  harness.evaluate("workshopPollGeneration = 10; workshopPollInFlight = 0; workshopTimer = null");
+  let overlapCalls = 0;
+  let releaseOverlap;
+  const overlapResponse = new Promise((resolve) => { releaseOverlap = resolve; });
+  harness.context.fetch = () => {
+    overlapCalls += 1;
+    return overlapResponse;
+  };
+  const firstPoll = harness.evaluate('pollWorkshopJob(10, "job-overlap")');
+  await harness.evaluate('pollWorkshopJob(10, "job-overlap")');
+  assert.equal(overlapCalls, 1);
+  releaseOverlap(response({
+    ok: true,
+    job: "job-overlap",
+    status: "running",
+    rows: [],
+    result: null,
+    progress: { phase: "measure", percent: 10 }
+  }));
+  await firstPoll;
+
+  harness.setState({ status: "running", job: "job-old", rows: [], result: null });
+  harness.evaluate("workshopPollGeneration = 20; workshopPollInFlight = 0; workshopTimer = null");
+  let releaseOld;
+  const oldResponse = new Promise((resolve) => { releaseOld = resolve; });
+  harness.context.fetch = () => oldResponse;
+  const oldPoll = harness.evaluate('pollWorkshopJob(20, "job-old")');
+  harness.setState({ status: "running", job: "job-new", rows: [], result: null });
+  harness.evaluate("workshopPollGeneration = 21");
+  releaseOld(response({
+    ok: true,
+    job: "job-old",
+    status: "done",
+    result: { ok: true, delay_ms: 9999, confidence: "ALTA" }
+  }));
+  await oldPoll;
+  assert.equal(harness.getState().job, "job-new");
+  assert.equal(harness.getState().status, "running");
+
+  harness.setState({ status: "running", job: "job-missing", rows: [], result: null });
+  harness.evaluate("workshopPollGeneration = 30; workshopPollInFlight = 0; workshopTimer = null");
+  harness.context.fetch = async () => response({ ok: false, error: "No encuentro ese trabajo." });
+  await harness.evaluate('pollWorkshopJob(30, "job-missing")');
+  assert.equal(harness.getState().status, "error");
+  assert.match(harness.getState().result.error, /ya no está disponible/);
+
+  const requests = [];
+  harness.setState({
+    status: "done",
+    job: "job-terminado",
+    result: { ok: true, delay_ms: 1234, confidence: "MEDIA" },
+    rows: [{ zona: "1" }],
+    ref: { path: "ref.mkv", audio: 1, metadata: {} },
+    esp: { path: "esp.mkv", audio: 2, metadata: {} },
+    settings: { modo: "medir", perfil: "pelicula", carpeta_salida: "/out" }
+  });
+  harness.evaluate("workshopPollGeneration = 40; workshopPollInFlight = 0; workshopTimer = null");
+  harness.context.fetch = async (url) => {
+    requests.push(String(url));
+    if (String(url).includes("delay_audio_save_settings")) {
+      return response({ ok: true, settings: { modo: "medir", perfil: "pelicula", carpeta_salida: "/out" } });
+    }
+    if (String(url).includes("delay_audio_start")) {
+      return response({ ok: true, job: "job-relanzado", status: "running", requested_mode: "medir" });
+    }
+    return response({
+      ok: true,
+      job: "job-relanzado",
+      status: "running",
+      rows: [],
+      result: null,
+      progress: { phase: "measure", percent: 0 }
+    });
+  };
+  await harness.evaluate("runWorkshop()");
+  await Promise.resolve();
+  assert.equal(harness.getState().job, "job-relanzado");
+  assert.equal(harness.getState().status, "running");
+  assert.equal(harness.getState().result, null);
+  assert.equal(requests.filter((url) => url.includes("delay_audio_start")).length, 1);
+  assert.equal(requests.some((url) => url.includes("job=job-terminado")), false);
+
+  console.log("workshop_ui: 5 casos OK");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

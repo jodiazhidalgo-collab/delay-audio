@@ -130,6 +130,14 @@ class HybridFastPathTests(unittest.TestCase):
             returncode = motor.run_hybrid_fast_path(duration, duration, 0, 0)
             with open(motor.result_path, "r", encoding="utf-8") as handle:
                 result = json.load(handle)
+            motor.captured_events = []
+            if os.path.isfile(motor.diag.events_path):
+                with open(motor.diag.events_path, "r", encoding="utf-8") as handle:
+                    motor.captured_events = [json.loads(line) for line in handle if line.strip()]
+            motor.captured_errors = []
+            if os.path.isfile(motor.diag.errors_path):
+                with open(motor.diag.errors_path, "r", encoding="utf-8") as handle:
+                    motor.captured_errors = json.load(handle)
             return motor, returncode, result
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
@@ -210,6 +218,14 @@ class HybridFastPathTests(unittest.TestCase):
         self.assertEqual(result["audio"]["supporting_zones"], 2)
         self.assertIn("audio_does_not_support_visual_winner", result["decision"]["contradictions"])
 
+    def test_two_contradictory_audio_zones_block_export(self):
+        _, returncode, result = self.run_case(winner=0, audio_delays=(1000, -1000))
+        self.assertEqual(returncode, 0)
+        self.assertNotEqual(result["state"], "OK_VERIFICADO")
+        self.assertFalse(result["export_allowed"])
+        self.assertLess(result["audio"]["supporting_zones"], 2)
+        self.assertIn("audio_does_not_support_visual_winner", result["decision"]["contradictions"])
+
     def test_two_low_audio_scores_cannot_authorize(self):
         _, _, result = self.run_case(scores=(0.35, 0.35))
         self.assertNotEqual(result["state"], "OK_VERIFICADO")
@@ -222,6 +238,23 @@ class HybridFastPathTests(unittest.TestCase):
         self.assertEqual(result["state"], "SIN_ZONAS_VALIDAS")
         self.assertFalse(result["export_allowed"])
         self.assertEqual(result["audio"]["supporting_zones"], 0)
+
+    def test_extremely_short_trailer_finishes_fast_with_clear_safe_diagnosis(self):
+        motor, returncode, result = self.run_case(profile="trailer", duration=2.0)
+        self.assertEqual(returncode, 0)
+        self.assertEqual(result["state"], "SIN_ZONAS_VALIDAS")
+        self.assertFalse(result["export_allowed"])
+        self.assertEqual(result["audio"]["supporting_zones"], 0)
+        self.assertEqual(motor.audio_calls, [])
+        self.assertIn("sin_dos_zonas", result["decision"]["reason"])
+        discovery_events = [
+            event["event"]
+            for event in motor.captured_events
+            if event["phase"] == "audio_discovery"
+        ]
+        self.assertIn("started", discovery_events)
+        self.assertIn("finished", discovery_events)
+        self.assertEqual(motor.captured_errors, [])
 
 
 class FastAudioZoneTests(unittest.TestCase):

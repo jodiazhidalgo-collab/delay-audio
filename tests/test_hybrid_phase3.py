@@ -1,6 +1,9 @@
+import json
 import os
 import sys
+import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -186,8 +189,115 @@ class HybridResultContractTests(unittest.TestCase):
         self.assertEqual(routes.status_para_resultado({"ok": True}, "done"), "done")
         self.assertEqual(routes.status_para_resultado({"ok": False}, "done"), "error")
 
+    def test_real_legacy_job_directory_is_reconstructed_and_returned_by_status(self):
+        runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
+        os.makedirs(runtime_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="phase7-legacy-", dir=runtime_root) as log_root:
+            job_id = "legacy_job_2024"
+            job_dir = os.path.join(log_root, job_id)
+            os.makedirs(job_dir, exist_ok=True)
+            with open(os.path.join(job_dir, "job.json"), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "status": "done",
+                    "inputs": {"video_bueno": "ref.mkv", "video_espanol": "esp.mkv"},
+                    "settings": {"modo": "medir", "perfil": "pelicula"},
+                }, handle)
+            with open(os.path.join(job_dir, "resultado.json"), "w", encoding="utf-8") as handle:
+                json.dump(complete_legacy_result(), handle)
+            with open(os.path.join(job_dir, "MEDIR_DELAY_AUDIO_LOG.txt"), "w", encoding="utf-8") as handle:
+                handle.write("resultado legacy listo\n")
+            with open(os.path.join(job_dir, "MEDIR_DELAY_AUDIO_RESULTADOS.csv"), "w", encoding="utf-8") as handle:
+                handle.write("zona;delay_ms\n6;96540\n")
+            with (
+                patch.object(routes, "LOG_ROOT", log_root),
+                patch.object(routes, "_JOBS", {}),
+            ):
+                response = routes.estado(job_id)
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["status"], "done")
+        self.assertEqual(response["requested_mode"], "medir")
+        self.assertEqual(response["profile"], "pelicula")
+        self.assertEqual(response["result"]["delay_ms"], 96540)
+        self.assertEqual(response["result"]["confidence"], "MEDIA")
+        self.assertNotIn("state", response["result"])
+
 
 class HybridExportGateTests(unittest.TestCase):
+    def test_api_job_converts_real_motor_failure_to_one_blocked_technical_closure(self):
+        runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
+        os.makedirs(runtime_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="phase7-api-error-", dir=runtime_root) as job_dir:
+            job = {
+                "id": "phase7-api-error",
+                "status": "running",
+                "job_dir": job_dir,
+                "ref": "ref.mkv",
+                "esp": "esp.mkv",
+                "esp_video_original": "esp.mkv",
+                "ref_audio": "",
+                "esp_audio": "",
+                "delay_hint_ms": 0,
+                "requested_mode": "exportar",
+                "profile": "pelicula",
+                "hybrid_enabled": True,
+                "fps_correction": {
+                    "planned": False,
+                    "enabled": False,
+                    "confirmed": False,
+                    "applied": False,
+                    "reason": "fps_iguales",
+                    "ref_fps": 24.0,
+                    "esp_fps": 24.0,
+                },
+                "log_path": os.path.join(job_dir, "MEDIR_DELAY_AUDIO_LOG.txt"),
+                "csv_path": os.path.join(job_dir, "MEDIR_DELAY_AUDIO_RESULTADOS.csv"),
+                "result_path": os.path.join(job_dir, "resultado.json"),
+                "progress_path": os.path.join(job_dir, "progress.json"),
+            }
+            trace = []
+
+            def record_event(_job, phase, event_name, message="", data=None, level="info"):
+                trace.append(("event", phase, event_name, data or {}))
+
+            def record_error(_job, error_code, phase, message, data=None, exc=None):
+                trace.append(("error", phase, error_code, data or {}))
+
+            def record_finish(_job, status, result=None):
+                trace.append(("finish", status, (result or {}).get("state"), result or {}))
+
+            with (
+                patch.object(routes, "diagnostico_attach"),
+                patch.object(routes, "diagnostico_update"),
+                patch.object(routes, "diagnostico_command"),
+                patch.object(routes, "diagnostico_event", side_effect=record_event),
+                patch.object(routes, "diagnostico_error", side_effect=record_error),
+                patch.object(routes, "diagnostico_finish", side_effect=record_finish),
+                patch.object(routes, "leer_config", return_value={"modo": "exportar"}),
+                patch.object(routes, "log_job"),
+                patch.object(routes, "limpiar_temporales_diagnosticados", return_value=[]),
+                patch.object(routes.subprocess, "Popen", return_value=SimpleNamespace(wait=lambda: 1)),
+            ):
+                routes._ejecutar_job(job)
+
+            with open(job["result_path"], "r", encoding="utf-8") as handle:
+                result = json.load(handle)
+
+        self.assertEqual(job["status"], "error")
+        self.assertEqual(result["state"], "ERROR_TECNICO")
+        self.assertIs(result["export_allowed"], False)
+        self.assertEqual(result["decision"]["reason"], "motor_medicion_fallido")
+        self.assertEqual(result["export"]["status"], "skipped")
+        decisions = [item for item in trace if item[0:2] == ("event", "decision")]
+        gates = [item for item in trace if item[0:3] == ("event", "export_gate", "blocked")]
+        finishes = [item for item in trace if item[0] == "finish"]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0][2], "error_tecnico")
+        self.assertEqual(len(gates), 1)
+        self.assertEqual(len(finishes), 1)
+        self.assertEqual(finishes[0][1:3], ("error", "ERROR_TECNICO"))
+        self.assertLess(trace.index(gates[0]), trace.index(decisions[0]))
+        self.assertLess(trace.index(decisions[0]), trace.index(finishes[0]))
+
     def test_failed_cleanup_paths_are_kept_for_retry(self):
         paths = ["removed.tmp", "remaining.tmp"]
         outcomes = {
@@ -236,6 +346,58 @@ class HybridExportGateTests(unittest.TestCase):
         write_json.assert_called_once()
         self.assertEqual(write_json.call_args.args[1]["export"]["reason"], "hybrid_export_gate_blocked")
         self.assertTrue(any(call.args[2] == "blocked" for call in event.call_args_list))
+
+    def test_technical_error_closes_result_and_blocks_before_export_code(self):
+        job = {"hybrid_enabled": True, "requested_mode": "exportar", "result_path": "result.json"}
+        technical = routes.construir_resultado_hibrido(
+            "ERROR_TECNICO",
+            reason="ffmpeg_failed",
+            contradictions=["technical_failure"],
+        )
+        with (
+            patch.object(routes, "diagnostico_attach"),
+            patch.object(routes, "leer_config", return_value={"modo": "exportar"}),
+            patch.object(routes, "leer_json", return_value=technical),
+            patch.object(routes, "log_job"),
+            patch.object(routes, "diagnostico_event") as event,
+            patch.object(routes, "escribir_json") as write_json,
+            patch.object(routes, "escribir_progreso"),
+            patch.object(routes, "duracion_video_principal") as duration_probe,
+        ):
+            routes.exportar_si_corresponde(job)
+        self.assertEqual(technical["state"], "ERROR_TECNICO")
+        self.assertIs(technical["export_allowed"], False)
+        self.assertEqual(job["_export_gate_event"], "blocked")
+        duration_probe.assert_not_called()
+        self.assertEqual(write_json.call_args.args[1]["export"]["status"], "skipped")
+        self.assertTrue(any(call.args[1:3] == ("export_gate", "blocked") for call in event.call_args_list))
+
+    def test_measure_and_export_enters_exporter_only_for_verified_result(self):
+        job = {
+            "hybrid_enabled": True,
+            "requested_mode": "exportar",
+            "result_path": "result.json",
+            "ref": "ref.mkv",
+            "esp": "esp.mkv",
+            "output_dir": "out",
+        }
+        with (
+            patch.object(routes, "diagnostico_attach"),
+            patch.object(routes, "leer_config", return_value={"modo": "exportar", "carpeta_salida": "out"}),
+            patch.object(routes, "leer_json", return_value=verified_result()),
+            patch.object(routes, "log_job"),
+            patch.object(routes, "diagnostico_event") as event,
+            patch.object(routes, "ruta_permitida", return_value=True),
+            patch.object(routes.os, "makedirs"),
+            patch.object(routes, "ruta_salida_unica", return_value="out/final.mkv"),
+            patch.object(routes, "ruta_temporal_exportacion", return_value="out/final.tmp.mkv"),
+            patch.object(routes, "duracion_video_principal", side_effect=RuntimeError("EXPORTER_REACHED")) as duration_probe,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "EXPORTER_REACHED"):
+                routes.exportar_si_corresponde(job)
+        self.assertEqual(job["_export_gate_event"], "allowed")
+        duration_probe.assert_called_once_with("ref.mkv")
+        self.assertTrue(any(call.args[1:3] == ("export_gate", "allowed") for call in event.call_args_list))
 
     def test_measure_only_never_reads_or_exports_result(self):
         with (

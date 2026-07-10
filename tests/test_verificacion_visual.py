@@ -1,12 +1,15 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 MOTOR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "motor", "delay_audio"))
 if MOTOR_ROOT not in sys.path:
     sys.path.insert(0, MOTOR_ROOT)
 
+import verificacion_visual as visual_module  # noqa: E402
 from verificacion_visual import VideoMetadata, VisualVerifier, map_ref_to_esp_time, pick_zones  # noqa: E402
 
 
@@ -34,6 +37,33 @@ class VisualMappingTests(unittest.TestCase):
                 self.assertAlmostEqual(negative, (ref_time + 1.5) * tempo, places=9)
                 self.assertLess(positive, ref_time * tempo)
                 self.assertGreater(negative, ref_time * tempo)
+
+    def test_all_required_fps_pairs_keep_formula_and_delay_sign(self):
+        pairs = (
+            (24.0, 24.0),
+            (24000 / 1001, 24.0),
+            (24000 / 1001, 25.0),
+            (25.0, 24000 / 1001),
+        )
+        for ref_fps, esp_fps in pairs:
+            tempo = ref_fps / esp_fps
+            for ref_time in (18.0, 60.0, 102.0):
+                for delay_sec in (-1.5, 0.0, 1.5):
+                    with self.subTest(
+                        ref_fps=ref_fps,
+                        esp_fps=esp_fps,
+                        ref_time=ref_time,
+                        delay_sec=delay_sec,
+                    ):
+                        mapped = map_ref_to_esp_time(ref_time, delay_sec, tempo)
+                        zero = map_ref_to_esp_time(ref_time, 0.0, tempo)
+                        self.assertAlmostEqual(mapped, (ref_time - delay_sec) * tempo, places=9)
+                        if delay_sec > 0:
+                            self.assertLess(mapped, zero)
+                        elif delay_sec < 0:
+                            self.assertGreater(mapped, zero)
+                        else:
+                            self.assertEqual(mapped, zero)
 
     def test_map_rejects_invalid_tempo(self):
         with self.assertRaises(ValueError):
@@ -106,7 +136,53 @@ class FailingVisualVerifier(VisualVerifier):
         raise RuntimeError("ffmpeg visual simulado falló")
 
 
+class PassingVisualVerifier(VisualVerifier):
+    def _run_ssim(self, *args, **kwargs):
+        return [0.91, 0.92, 0.93, 0.94], 0.001
+
+
 class VisualTechnicalErrorTests(unittest.TestCase):
+    def test_master_and_spanish_duration_boundaries_are_fail_closed(self):
+        verifier = PassingVisualVerifier()
+        master_exact = verifier.score_candidate(
+            "ref.mkv",
+            "esp.mkv",
+            98.0,
+            0,
+            ref_duration=99.95,
+            esp_duration=100.0,
+        )
+        master_outside = verifier.score_candidate(
+            "ref.mkv",
+            "esp.mkv",
+            98.0,
+            0,
+            ref_duration=99.949,
+            esp_duration=100.0,
+        )
+        spanish_exact = verifier.score_candidate(
+            "ref.mkv",
+            "esp.mkv",
+            10.0,
+            0,
+            tempo=2.0,
+            ref_duration=20.0,
+            esp_duration=23.95,
+        )
+        spanish_outside = verifier.score_candidate(
+            "ref.mkv",
+            "esp.mkv",
+            10.0,
+            0,
+            tempo=2.0,
+            ref_duration=20.0,
+            esp_duration=23.949,
+        )
+        self.assertTrue(master_exact["ok"])
+        self.assertEqual(master_outside["error_kind"], "out_of_range")
+        self.assertTrue(spanish_exact["ok"])
+        self.assertEqual(spanish_outside["error_kind"], "out_of_range")
+
     def test_out_of_range_candidate_is_expected_rejection(self):
         verifier = FailingVisualVerifier()
         result = verifier.score_candidate(
@@ -186,6 +262,22 @@ class FpsConfirmationTests(unittest.TestCase):
         self.assertFalse(result["confirmed"])
         self.assertEqual(result["reason"], "duracion_no_confirma_tempo")
 
+    def test_compatible_duration_is_still_rejected_when_image_does_not_confirm_tempo(self):
+        ref_fps = 24000 / 1001
+        esp_fps = 25.0
+        tempo = ref_fps / esp_fps
+        verifier = DeterministicFpsVerifier(
+            fake_meta("ref", 100.0, ref_fps),
+            fake_meta("esp", 100.0 * tempo, esp_fps),
+            planned_score=0.79,
+            nominal_score=0.40,
+        )
+        result = verifier.confirm_fps_plan("ref", "esp", ref_fps, esp_fps, "pelicula")
+        self.assertTrue(result["duration"]["match"])
+        self.assertFalse(result["visual"]["match"])
+        self.assertFalse(result["confirmed"])
+        self.assertEqual(result["reason"], "imagen_no_confirma_tempo")
+
     def test_vfr_is_not_automatically_confirmed(self):
         tempo = (24000 / 1001) / 24
         verifier = DeterministicFpsVerifier(
@@ -195,6 +287,63 @@ class FpsConfirmationTests(unittest.TestCase):
         result = verifier.confirm_fps_plan("ref", "esp", 24000 / 1001, 24, "pelicula")
         self.assertFalse(result["confirmed"])
         self.assertEqual(result["reason"], "vfr_no_confirmado")
+
+    def test_vfr_in_spanish_video_is_not_automatically_confirmed(self):
+        tempo = (24000 / 1001) / 24
+        verifier = DeterministicFpsVerifier(
+            fake_meta("ref", 100, 24000 / 1001),
+            fake_meta("esp", 100 * tempo, 24, vfr=True),
+        )
+        result = verifier.confirm_fps_plan("ref", "esp", 24000 / 1001, 24, "pelicula")
+        self.assertFalse(result["confirmed"])
+        self.assertEqual(result["reason"], "vfr_no_confirmado")
+
+    def test_probe_video_detects_vfr_from_average_and_real_rates(self):
+        payload = (
+            '{"streams":[{"duration":"100.0","avg_frame_rate":"24000/1001",'
+            '"r_frame_rate":"24/1","width":1920,"height":1080,'
+            '"pix_fmt":"yuv420p","color_transfer":"bt709"}],'
+            '"format":{"duration":"100.0"}}'
+        )
+        proc = SimpleNamespace(returncode=0, stdout=payload, stderr="")
+        with (
+            patch.object(visual_module.os.path, "isfile", return_value=True),
+            patch.object(visual_module.subprocess, "run", return_value=proc),
+        ):
+            metadata = VisualVerifier().probe_video("video.mkv")
+        self.assertAlmostEqual(metadata.avg_fps, 24000 / 1001, places=9)
+        self.assertEqual(metadata.real_fps, 24.0)
+        self.assertTrue(metadata.variable_frame_rate)
+
+
+class ReplacementVisualVerifier(VisualVerifier):
+    def __init__(self, event_callback=None):
+        super().__init__(event_callback=event_callback)
+
+    def probe_video(self, path):
+        return fake_meta(path, 100.0, 24.0)
+
+    def score_candidate(self, ref_video, esp_video_original, ref_time, delay_ms, *args, **kwargs):
+        initial = any(abs(ref_time - value) < 0.001 for value in (18.0, 50.0, 82.0))
+        score = 0.30 if initial else (0.95 if int(delay_ms) == 0 else 0.40)
+        return {"ok": True, "mean_ssim": score, "frames": 4}
+
+
+class VisualReplacementTests(unittest.TestCase):
+    def test_useless_initial_zones_do_not_count_and_are_replaced(self):
+        events = []
+        verifier = ReplacementVisualVerifier(
+            event_callback=lambda phase, event, data: events.append((phase, event, data))
+        )
+        result = verifier.score_candidates("ref", "esp", [0], "pelicula")
+        initial = [zone for zone in result["zones"] if zone["origin"] == "initial"]
+        replacements = [event for event in events if event[1] == "zone_replaced"]
+        self.assertEqual([zone["state"] for zone in initial], ["INUTIL", "INUTIL", "INUTIL"])
+        self.assertEqual(result["zones_valid"], 3)
+        self.assertEqual(result["winner_delay_ms"], 0)
+        self.assertTrue(result["strong_winner"])
+        self.assertEqual(result["candidates"][0]["wins"], 3)
+        self.assertEqual(len(replacements), 3)
 
 
 @unittest.skipUnless(
