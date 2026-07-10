@@ -416,8 +416,8 @@ def fingerprint_config_hibrida(profile, enabled, visual_method, profile_config):
 def _hybrid_ok_evidence(confidence, fps_correction, visual, audio, contradictions):
     supporting_zones = audio.get("supporting_zones") if isinstance(audio, dict) else None
     fps_safe = isinstance(fps_correction, dict)
-    for key in ("planned", "confirmed", "applied"):
-        if key in fps_correction and not isinstance(fps_correction.get(key), bool):
+    for key in ("planned", "provisional", "confirmed", "applied"):
+        if not isinstance(fps_correction.get(key), bool):
             fps_safe = False
     if fps_correction.get("planned") is True:
         ref_fps = fps_correction.get("ref_fps")
@@ -425,6 +425,7 @@ def _hybrid_ok_evidence(confidence, fps_correction, visual, audio, contradiction
         tempo = fps_correction.get("tempo")
         fps_safe = bool(
             fps_safe
+            and fps_correction.get("provisional") is True
             and fps_correction.get("confirmed") is True
             and fps_correction.get("applied") is True
             and _finite_number(ref_fps)
@@ -452,6 +453,7 @@ def _hybrid_ok_evidence(confidence, fps_correction, visual, audio, contradiction
             and float(esp_fps) > 0
             and abs(round(float(ref_fps), 3) - round(float(esp_fps), 3)) <= FPS_CORRECTION_THRESHOLD
             and fps_correction.get("confirmed") is False
+            and fps_correction.get("provisional") is False
             and fps_correction.get("applied") is False
         )
     return bool(
@@ -1250,7 +1252,7 @@ def _ejecutar_job(job):
         if job.get("hybrid_enabled") and fps_correction.get("planned"):
             fps_correction = confirmar_plan_fps(job, fps_correction, profile)
             job["fps_correction"] = fps_correction
-            if not fps_correction.get("confirmed"):
+            if not fps_correction.get("provisional"):
                 result = anexar_contexto_resultado_hibrido(
                     resultado_fps_no_confirmados(job, fps_correction, profile),
                     job,
@@ -1268,7 +1270,7 @@ def _ejecutar_job(job):
                 return
 
         if fps_correction.get("enabled") and (
-            not job.get("hybrid_enabled") or fps_correction.get("confirmed")
+            not job.get("hybrid_enabled") or fps_correction.get("provisional")
         ):
             preparar_audio_fps_medicion(job, fps_correction, temp_cleanup_paths)
 
@@ -1290,8 +1292,15 @@ def _ejecutar_job(job):
             cmd += ["--fps-tempo", str(fps_correction.get("tempo"))]
         if fps_correction.get("planned"):
             cmd += ["--fps-plan-enabled"]
+        if fps_correction.get("provisional"):
+            cmd += ["--fps-plan-provisional"]
         if fps_correction.get("confirmed"):
             cmd += ["--fps-plan-confirmed"]
+        if fps_correction.get("planned"):
+            cmd += [
+                "--fps-plan-context-json",
+                json.dumps(fps_correction, ensure_ascii=False, separators=(",", ":")),
+            ]
         if job.get("hybrid_enabled"):
             cmd += ["--hybrid-enabled"]
             profile_config = job.get("hybrid_profile_config")
@@ -1380,7 +1389,7 @@ def _ejecutar_job(job):
 
 
 def confirmar_plan_fps(job, fps_plan, profile):
-    diagnostico_event(job, "fps_plan", "started", "Confirmando plan FPS", {
+    diagnostico_event(job, "fps_plan", "started", "Comprobando plan FPS provisional", {
         "profile": profile,
         "ref_fps": fps_plan.get("ref_fps"),
         "esp_fps": fps_plan.get("esp_fps"),
@@ -1400,6 +1409,7 @@ def confirmar_plan_fps(job, fps_plan, profile):
         str(fps_plan.get("ref_fps")),
         "--fps-esp",
         str(fps_plan.get("esp_fps")),
+        "--provisional-only",
     ]
     profile_config = job.get("hybrid_profile_config")
     visual_config = profile_config.get("visual") if isinstance(profile_config, dict) else None
@@ -1421,7 +1431,7 @@ def confirmar_plan_fps(job, fps_plan, profile):
         diagnostico_command(
             job,
             "fps_plan",
-            "confirm_fps_plan",
+            "provisional_fps_plan",
             cmd,
             proc.returncode,
             started_at,
@@ -1430,16 +1440,16 @@ def confirmar_plan_fps(job, fps_plan, profile):
             proc.returncode == 0,
         )
         if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "No se pudo confirmar el plan FPS").strip()
+            detail = (proc.stderr or proc.stdout or "No se pudo comprobar el plan FPS provisional").strip()
             raise RuntimeError(detail[-800:])
         try:
             confirmation = json.loads(proc.stdout or "{}")
         except Exception as exc:
-            raise RuntimeError("La confirmación FPS no devolvió JSON válido") from exc
+            raise RuntimeError("El plan FPS provisional no devolvió JSON válido") from exc
         if not isinstance(confirmation, dict):
-            raise RuntimeError("La confirmación FPS devolvió un resultado inválido")
+            raise RuntimeError("El plan FPS provisional devolvió un resultado inválido")
     except Exception as exc:
-        diagnostico_event(job, "fps_plan", "rejected", "No se pudo confirmar el plan FPS", {
+        diagnostico_event(job, "fps_plan", "rejected", "No se pudo comprobar el plan FPS provisional", {
             "profile": profile,
             "ref_fps": fps_plan.get("ref_fps"),
             "esp_fps": fps_plan.get("esp_fps"),
@@ -1450,18 +1460,19 @@ def confirmar_plan_fps(job, fps_plan, profile):
         raise
     result = dict(fps_plan)
     result.update(confirmation)
-    result["confirmed"] = confirmation.get("confirmed") is True
-    result["enabled"] = result["confirmed"]
+    result["provisional"] = confirmation.get("provisional") is True
+    result["confirmed"] = False
+    result["enabled"] = result["provisional"]
     result["applied"] = False
-    event_name = "confirmed" if result.get("confirmed") else "rejected"
-    diagnostico_event(job, "fps_plan", event_name, "Plan FPS confirmado" if result.get("confirmed") else "Plan FPS rechazado", {
+    event_name = "provisional" if result.get("provisional") else "rejected"
+    diagnostico_event(job, "fps_plan", event_name, "Plan FPS provisional aceptado" if result.get("provisional") else "Plan FPS rechazado", {
         "reason": result.get("reason"),
         "ref_fps": result.get("ref_fps"),
         "esp_fps": result.get("esp_fps"),
         "tempo": result.get("tempo"),
         "duration": result.get("duration"),
         "visual": result.get("visual"),
-    }, level="info" if result.get("confirmed") else "error")
+    }, level="info" if result.get("provisional") else "error")
     return result
 
 
@@ -2344,10 +2355,11 @@ def planificar_correccion_fps(ref, esp):
     ref_fps = float(ref_meta.get("fps_value") or 0.0)
     esp_fps = float(esp_meta.get("fps_value") or 0.0)
     if not ref_fps or not esp_fps:
-        return {"planned": False, "enabled": False, "confirmed": False, "applied": False, "reason": "fps_no_detectado"}
+        return {"planned": False, "provisional": False, "enabled": False, "confirmed": False, "applied": False, "reason": "fps_no_detectado"}
     if abs(round(ref_fps, 3) - round(esp_fps, 3)) <= FPS_CORRECTION_THRESHOLD:
         return {
             "planned": False,
+            "provisional": False,
             "enabled": False,
             "confirmed": False,
             "applied": False,
@@ -2357,9 +2369,10 @@ def planificar_correccion_fps(ref, esp):
         }
     tempo = ref_fps / esp_fps
     if not tempo or tempo <= 0:
-        return {"planned": False, "enabled": False, "confirmed": False, "applied": False, "reason": "tempo_no_valido"}
+        return {"planned": False, "provisional": False, "enabled": False, "confirmed": False, "applied": False, "reason": "tempo_no_valido"}
     return {
         "planned": True,
+        "provisional": False,
         "enabled": True,
         "confirmed": False,
         "applied": False,
@@ -2439,10 +2452,13 @@ def preparar_audio_fps_medicion(job, fps_correction, temp_cleanup_paths):
     job["esp_measure_path"] = temp_audio_path
     job["esp_audio_medicion"] = temp_audio_path
     job["esp_measure_audio"] = 0
-    fps_correction["applied"] = True
-    diagnostico_event(job, "fps_correction", "finished", "Audio FPS preparado", {
+    fps_correction["applied"] = False
+    diagnostico_event(job, "fps_correction", "finished", "Audio FPS provisional preparado", {
         "path": temp_audio_path,
         "tempo": tempo,
+        "provisional": True,
+        "confirmed": False,
+        "applied": False,
     })
 
 
@@ -2556,8 +2572,13 @@ def anexar_correccion_fps_resultado(job):
     result = leer_json(job["result_path"]) or {}
     if not isinstance(result, dict) or not result.get("ok"):
         return
+    if job.get("hybrid_enabled") and isinstance(result.get("fps_correction"), dict):
+        motor_fps = dict(result["fps_correction"])
+        job["fps_correction"] = motor_fps
+        return
     result["fps_correction"] = {
         "planned": bool(fps_correction.get("planned", fps_correction.get("enabled"))),
+        "provisional": bool(fps_correction.get("provisional")),
         "enabled": bool(fps_correction.get("enabled")),
         "confirmed": bool(fps_correction.get("confirmed")),
         "applied": bool(fps_correction.get("applied")),

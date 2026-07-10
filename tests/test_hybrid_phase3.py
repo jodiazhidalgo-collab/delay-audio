@@ -22,6 +22,7 @@ def verified_result(**overrides):
         "confidence": "ALTA",
         "fps_correction": {
             "planned": False,
+            "provisional": False,
             "confirmed": False,
             "applied": False,
             "reason": "fps_iguales",
@@ -88,7 +89,7 @@ class HybridResultContractTests(unittest.TestCase):
         self.assertIs(result["export_allowed"], False)
 
     def test_unconfirmed_planned_fps_cannot_become_verified(self):
-        result = verified_result(fps_correction={"planned": True, "confirmed": False, "applied": False})
+        result = verified_result(fps_correction={"planned": True, "provisional": True, "confirmed": False, "applied": False})
         self.assertEqual(result["state"], "NO_FIABLE")
         self.assertIs(result["export_allowed"], False)
 
@@ -106,6 +107,7 @@ class HybridResultContractTests(unittest.TestCase):
 
         valid = verified_result(fps_correction={
             "planned": True,
+            "provisional": True,
             "confirmed": True,
             "applied": True,
             "ref_fps": 24000 / 1001,
@@ -300,6 +302,7 @@ class HybridExportGateTests(unittest.TestCase):
                 "hybrid_enabled": True,
                 "fps_correction": {
                     "planned": False,
+                    "provisional": False,
                     "enabled": False,
                     "confirmed": False,
                     "applied": False,

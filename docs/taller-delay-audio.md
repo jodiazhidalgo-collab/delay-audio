@@ -28,7 +28,7 @@ Mientras un trabajo está activo, Taller bloquea cambios de entradas, pistas, mo
 El motor separa siempre la evidencia visual de la evidencia de audio:
 
 1. La imagen compara `Video Bueno` con el vídeo español original.
-2. El audio compara las pistas seleccionadas, usando un temporal corregido únicamente si el plan FPS fue confirmado.
+2. El audio compara las pistas seleccionadas. Con FPS distintos usa un `.mka` provisional después de que duración y VFR permitan el plan, pero ese temporal no confirma ni aplica todavía la corrección.
 3. El camino rápido necesita coincidencia visual fuerte y al menos dos zonas de audio coherentes.
 4. Si falta corroboración, el descubrimiento amplía zonas solo por una duda concreta registrada.
 5. Ningún score aislado, una sola zona o una confianza heredada autorizan exportación.
@@ -48,10 +48,14 @@ Usa ventanas cortas adaptadas a su duración y radios de búsqueda menores. Mant
 ## Corrección FPS
 
 - FPS nominales distintos crean un plan; no aplican una corrección por sí solos.
-- Antes de crear el audio corregido, el híbrido confirma el tempo mediante duración e imagen del vídeo español original.
-- Solo un plan confirmado puede generar el `.mka` temporal y aplicar `atempo` al audio español.
-- La verificación visual posterior sigue usando el vídeo original, nunca el `.mka`.
-- Si duración, imagen o cadencia variable no confirman el plan, el estado es `FPS_NO_CONFIRMADOS` y la exportación queda bloqueada.
+- Duración incompatible o VFR rechazan el plan antes de crear el audio corregido.
+- Si la duración encaja y no hay VFR, el plan pasa a `provisional:true` y genera un `.mka` temporal para medir el audio; `confirmed` y `applied` siguen en `false`.
+- Película exige al menos tres zonas separadas en un mismo clúster, dispersión compatible y ausencia de deriva progresiva (`abs(slope) <= 0.1 ms/s`).
+- El delay provisional obtenido por audio se usa para comparar visualmente el tempo planificado frente al nominal mediante `t_esp = (t_ref - delay) * tempo`.
+- La imagen usa siempre `Video Bueno` y el vídeo español original. El `.mka` se usa únicamente para audio.
+- La confirmación visual conserva el camino SSIM absoluto y permite un camino relativo para encodes distintos: mejora de al menos `0.05` en dos zonas, media mínima `0.08` y ninguna zona contradictoria. Ese camino nunca basta sin duración compatible, audio estable y ausencia de VFR.
+- Solo cuando duración, audio sin deriva e imagen convergen se marcan `confirmed:true` y `applied:true`; el motivo es `duration_audio_drift_and_visual_match`.
+- Si duración, audio, imagen o cadencia variable no confirman el plan, el estado es `FPS_NO_CONFIRMADOS` y la exportación queda bloqueada.
 - FPS iguales se muestran como corrección no necesaria.
 - FPS ausentes, no finitos o con un tempo inválido se consideran no confirmados y nunca autorizan un resultado.
 
@@ -93,10 +97,12 @@ La exportación conserva el vídeo bueno, prepara el audio español, sincroniza 
 
 La trazabilidad mínima incluye:
 
-- `fps_plan.started`, `fps_plan.confirmed` o `fps_plan.rejected`;
+- `fps_plan.started`, `fps_plan.provisional` o `fps_plan.rejected`;
 - `visual_gate.started`, zonas puntuadas o reemplazadas y `visual_gate.finished`;
 - `audio_narrow.started` y `audio_narrow.finished`;
 - `audio_discovery.started`, candidatos ordenados y `audio_discovery.finished`;
+- `fps_audio_evidence.finished` con soporte, dispersión y pendiente;
+- `fps_visual_confirmation.started`, comparación por zona y decisión final;
 - `visual_final.started`, candidatos puntuados y `visual_final.finished`;
 - `decision.ok_verificado` o el estado de rechazo concreto;
 - `export_gate.allowed` o `export_gate.blocked`;

@@ -236,7 +236,14 @@ class FpsConfirmationTests(unittest.TestCase):
             fake_meta("ref", 100.0, ref_fps),
             fake_meta("esp", 100.0 * tempo, esp_fps),
         )
-        result = verifier.confirm_fps_plan("ref", "esp", ref_fps, esp_fps, "pelicula")
+        result = verifier.confirm_fps_plan(
+            "ref",
+            "esp",
+            ref_fps,
+            esp_fps,
+            "pelicula",
+            audio_evidence={"stable": True},
+        )
         self.assertTrue(result["planned"])
         self.assertTrue(result["confirmed"])
         self.assertAlmostEqual(result["tempo"], tempo, places=9)
@@ -262,21 +269,52 @@ class FpsConfirmationTests(unittest.TestCase):
         self.assertFalse(result["confirmed"])
         self.assertEqual(result["reason"], "duracion_no_confirma_tempo")
 
-    def test_compatible_duration_is_still_rejected_when_image_does_not_confirm_tempo(self):
+    def test_compatible_duration_is_still_rejected_without_absolute_or_relative_visual_support(self):
         ref_fps = 24000 / 1001
         esp_fps = 25.0
         tempo = ref_fps / esp_fps
         verifier = DeterministicFpsVerifier(
             fake_meta("ref", 100.0, ref_fps),
             fake_meta("esp", 100.0 * tempo, esp_fps),
-            planned_score=0.79,
+            planned_score=0.44,
             nominal_score=0.40,
         )
-        result = verifier.confirm_fps_plan("ref", "esp", ref_fps, esp_fps, "pelicula")
+        result = verifier.confirm_fps_plan(
+            "ref",
+            "esp",
+            ref_fps,
+            esp_fps,
+            "pelicula",
+            audio_evidence={"stable": True},
+        )
         self.assertTrue(result["duration"]["match"])
         self.assertFalse(result["visual"]["match"])
         self.assertFalse(result["confirmed"])
         self.assertEqual(result["reason"], "imagen_no_confirma_tempo")
+
+    def test_low_absolute_ssim_can_confirm_with_clear_consistent_relative_gain(self):
+        ref_fps = 24000 / 1001
+        esp_fps = 25.0
+        tempo = ref_fps / esp_fps
+        verifier = DeterministicFpsVerifier(
+            fake_meta("ref", 100.0, ref_fps),
+            fake_meta("esp", 100.0 * tempo, esp_fps),
+            planned_score=0.55,
+            nominal_score=0.40,
+        )
+        result = verifier.confirm_fps_plan(
+            "ref",
+            "esp",
+            ref_fps,
+            esp_fps,
+            "pelicula",
+            800,
+            {"stable": True},
+        )
+        self.assertTrue(result["confirmed"])
+        self.assertFalse(result["visual"]["absolute_match"])
+        self.assertTrue(result["visual"]["relative_match"])
+        self.assertEqual(result["reason"], "duration_audio_drift_and_visual_match")
 
     def test_vfr_is_not_automatically_confirmed(self):
         tempo = (24000 / 1001) / 24

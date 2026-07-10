@@ -261,15 +261,16 @@ class RouteSeparationTests(unittest.TestCase):
         self.assertIs(result["confirmed"], False)
         self.assertIs(result["enabled"], False)
 
-    def test_positive_api_fps_confirmation_enables_only_literal_verified_plan(self):
+    def test_positive_api_fps_precheck_enables_only_literal_provisional_plan(self):
         job = {"ref": "ref.mkv", "esp": "esp.mkv", "esp_video_original": "esp.mkv"}
         proc = SimpleNamespace(
             returncode=0,
             stdout=json.dumps({
-                "confirmed": True,
-                "reason": "duration_ratio_and_visual_match",
+                "provisional": True,
+                "confirmed": False,
+                "reason": "duration_ratio_provisional",
                 "duration": {"match": True},
-                "visual": {"match": True, "useful_zones": 3, "planned_wins": 3},
+                "visual": {},
             }),
             stderr="",
         )
@@ -291,10 +292,11 @@ class RouteSeparationTests(unittest.TestCase):
                 },
                 "pelicula",
             )
-        self.assertIs(result["confirmed"], True)
+        self.assertIs(result["provisional"], True)
+        self.assertIs(result["confirmed"], False)
         self.assertIs(result["enabled"], True)
         self.assertIs(result["applied"], False)
-        self.assertEqual([call.args[2] for call in event.call_args_list], ["started", "confirmed"])
+        self.assertEqual([call.args[2] for call in event.call_args_list], ["started", "provisional"])
 
     def test_invalid_fps_confirmation_always_emits_rejected_terminal_event(self):
         job = {"ref": "ref.mkv", "esp": "esp.mkv", "esp_video_original": "esp.mkv"}

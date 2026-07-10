@@ -43,7 +43,9 @@ class DelayAudio:
         fps_esp=0.0,
         fps_tempo=1.0,
         fps_plan_enabled=False,
+        fps_plan_provisional=False,
         fps_plan_confirmed=False,
+        fps_plan_context=None,
         hybrid_enabled=False,
         hybrid_config=None,
     ):
@@ -59,7 +61,9 @@ class DelayAudio:
         self.fps_esp = float(fps_esp or 0.0)
         self.fps_tempo = float(fps_tempo or 1.0)
         self.fps_plan_enabled = bool(fps_plan_enabled)
+        self.fps_plan_provisional = bool(fps_plan_provisional or fps_plan_confirmed)
         self.fps_plan_confirmed = bool(fps_plan_confirmed)
+        self.fps_confirmation = dict(fps_plan_context) if isinstance(fps_plan_context, dict) else {}
         self.hybrid_enabled = bool(hybrid_enabled)
         self.hybrid_config = dict(hybrid_config) if isinstance(hybrid_config, dict) else {}
         self.segment_sec = SEGMENT_SEC
@@ -726,6 +730,40 @@ class DelayAudio:
             })
         return sorted(ranked, key=lambda item: (item["count"], item["avg_score"]), reverse=True)
 
+    @staticmethod
+    def audio_drift_evidence(rows, duration_sec, slope_limit_ms_per_sec=0.1):
+        points = sorted(
+            (
+                float(row.get("start_sec") or 0.0),
+                float(row.get("delay_ms") or 0.0),
+            )
+            for row in rows
+        )
+        if len(points) < 2:
+            slope = None
+            span_sec = 0.0
+        else:
+            mean_x = sum(point[0] for point in points) / len(points)
+            mean_y = sum(point[1] for point in points) / len(points)
+            denominator = sum((point[0] - mean_x) ** 2 for point in points)
+            slope = (
+                sum((point[0] - mean_x) * (point[1] - mean_y) for point in points) / denominator
+                if denominator > 0
+                else None
+            )
+            span_sec = points[-1][0] - points[0][0]
+        minimum_span_sec = max(1.0, float(duration_sec or 0.0) * 0.25)
+        return {
+            "slope_ms_per_sec": round(slope, 6) if slope is not None else None,
+            "slope_limit_ms_per_sec": float(slope_limit_ms_per_sec),
+            "span_sec": round(span_sec, 3),
+            "minimum_span_sec": round(minimum_span_sec, 3),
+            "zones_separated": bool(span_sec >= minimum_span_sec),
+            "no_progressive_drift": bool(
+                slope is not None and abs(slope) <= float(slope_limit_ms_per_sec)
+            ),
+        }
+
     def remove_work_dir_checked(self, work_dir):
         if os.path.isdir(work_dir):
             try:
@@ -748,14 +786,20 @@ class DelayAudio:
             raise RuntimeError(f"El temporal propio sigue existiendo: {work_dir}")
 
     def hybrid_fps_summary(self):
-        summary = {
+        summary = dict(self.fps_confirmation) if isinstance(self.fps_confirmation, dict) else {}
+        summary.update({
             "planned": self.fps_plan_enabled,
+            "provisional": self.fps_plan_provisional,
             "confirmed": self.fps_plan_confirmed,
-            "applied": bool(self.fps_plan_enabled and self.fps_plan_confirmed),
+            "applied": bool(
+                self.fps_plan_enabled
+                and self.fps_plan_provisional
+                and self.fps_plan_confirmed
+            ),
             "ref_fps": self.fps_ref,
             "esp_fps": self.fps_esp,
             "tempo": self.fps_tempo,
-        }
+        })
         if not self.fps_plan_enabled:
             if self.fps_ref > 0 and self.fps_esp > 0 and round(self.fps_ref, 3) == round(self.fps_esp, 3):
                 summary["reason"] = "fps_iguales"
@@ -830,6 +874,179 @@ class DelayAudio:
                 "Verificación visual",
                 data,
             ),
+        )
+
+    def finish_provisional_fps_discovery(
+        self,
+        duration_ref,
+        ref_index,
+        esp_index,
+        settings,
+        clusters,
+        ranked_public,
+        rows,
+        zones_run,
+        expanded,
+        expansion_reason,
+        timing,
+        total_started,
+        discovery_sec,
+    ):
+        top_cluster = clusters[0] if clusters else None
+        supporting_rows = list((top_cluster or {}).get("items") or [])
+        support_count = int((top_cluster or {}).get("count") or 0)
+        support_avg = float((top_cluster or {}).get("avg_score") or 0.0)
+        support_spread = int((top_cluster or {}).get("spread_ms") or 0)
+        support_strong = sum(
+            1 for row in supporting_rows
+            if float(row.get("score") or 0.0) >= float(settings["support_strong_min"])
+        )
+        unique_audio_top = bool(
+            top_cluster is not None
+            and (
+                len(clusters) < 2
+                or int(clusters[0]["count"]) > int(clusters[1]["count"])
+            )
+        )
+        required_support = 3 if self.profile == "pelicula" else 2
+        drift = self.audio_drift_evidence(supporting_rows, duration_ref)
+        audio_stable = bool(
+            support_count >= required_support
+            and support_avg >= float(settings["support_avg_min"])
+            and support_strong >= 1
+            and support_spread <= int(settings["tolerance_ms"])
+            and unique_audio_top
+            and drift["zones_separated"]
+            and drift["no_progressive_drift"]
+        )
+        provisional_delay = int((top_cluster or {}).get("delay_ms") or 0)
+        audio = {
+            "method": "fps_provisional_audio_cluster_v1",
+            "delay_ms": provisional_delay,
+            "supporting_zones": support_count,
+            "required_supporting_zones": required_support,
+            "strong_zones": support_strong,
+            "avg_score": support_avg,
+            "spread_ms": support_spread,
+            "tolerance_ms": int(settings["tolerance_ms"]),
+            "zones_attempted": len(zones_run),
+            "zones_measured": len(rows),
+            "zones_separated": drift["zones_separated"],
+            "slope_ms_per_sec": drift["slope_ms_per_sec"],
+            "slope_limit_ms_per_sec": drift["slope_limit_ms_per_sec"],
+            "span_sec": drift["span_sec"],
+            "stable": audio_stable,
+            "expanded": expanded,
+            "expansion_reason": expansion_reason,
+            "hint_ms": self.delay_hint_ms,
+            "hint_is_measurement": False,
+            "clusters": ranked_public,
+            "results": rows,
+        }
+        self.diag.event("fps_audio_evidence", "finished", "Corroboración provisional de audio terminada", {
+            "delay_ms": provisional_delay,
+            "supporting_zones": support_count,
+            "required_supporting_zones": required_support,
+            "spread_ms": support_spread,
+            "slope_ms_per_sec": drift["slope_ms_per_sec"],
+            "slope_limit_ms_per_sec": drift["slope_limit_ms_per_sec"],
+            "zones_separated": drift["zones_separated"],
+            "stable": audio_stable,
+            "decision": "visual_confirmation" if audio_stable else "blocked",
+        }, level="info" if audio_stable else "error")
+        timing["audio_discovery_sec"] = round(discovery_sec, 3)
+
+        if not audio_stable:
+            self.fps_plan_confirmed = False
+            self.fps_confirmation.update({
+                "planned": True,
+                "provisional": True,
+                "confirmed": False,
+                "applied": False,
+                "enabled": False,
+                "reason": "audio_corregido_no_confirma_tempo",
+                "audio": audio,
+            })
+            visual = {
+                "verified": False,
+                "stage": "fps_visual_skipped",
+                "reason": "audio_corregido_no_confirma_tempo",
+                "zones_attempted": 0,
+                "zones_valid": 0,
+            }
+            timing["visual_final_sec"] = 0.0
+            timing["measurement_sec"] = round(time.monotonic() - total_started, 3)
+            return self.finish_hybrid_result(
+                "FPS_NO_CONFIRMADOS",
+                provisional_delay,
+                visual,
+                audio,
+                "audio_corregido_no_confirma_tempo",
+                ["fps_audio_cluster_or_drift_not_confirmed"],
+                timing,
+                ref_index,
+                esp_index,
+                stage="fps_provisional",
+            )
+
+        verifier = self.create_visual_verifier()
+        visual_started = time.monotonic()
+        self.diag.event("fps_visual_confirmation", "started", "Confirmación visual FPS iniciada", {
+            "delay_ms": provisional_delay,
+            "tempo": self.fps_tempo,
+            "video_espanol_original": self.esp_video_original,
+        })
+        confirmation = verifier.confirm_fps_plan(
+            self.ref_file,
+            self.esp_video_original,
+            self.fps_ref,
+            self.fps_esp,
+            self.profile,
+            provisional_delay,
+            audio,
+        )
+        visual_sec = time.monotonic() - visual_started
+        self.fps_confirmation = dict(confirmation)
+        self.fps_plan_provisional = confirmation.get("provisional") is True
+        self.fps_plan_confirmed = confirmation.get("confirmed") is True
+        visual = dict(confirmation.get("visual") or {})
+        visual["stage"] = "fps_visual_confirmation"
+        visual["tempo"] = self.fps_tempo
+        visual["used_original_spanish_video"] = True
+        for comparison in visual.get("comparisons") or []:
+            self.diag.event("fps_visual_confirmation", "zone_scored", "Zona visual FPS comparada", comparison)
+        self.diag.event("fps_visual_confirmation", "finished", "Confirmación visual FPS terminada", {
+            "delay_ms": provisional_delay,
+            "confirmed": self.fps_plan_confirmed,
+            "absolute_match": bool(visual.get("absolute_match")),
+            "relative_match": bool(visual.get("relative_match")),
+            "relative_wins": int(visual.get("relative_wins") or 0),
+            "mean_delta": visual.get("mean_delta"),
+            "reason": confirmation.get("reason"),
+            "duration_sec": round(visual_sec, 3),
+            "decision": "confirmed" if self.fps_plan_confirmed else "blocked",
+        }, level="info" if self.fps_plan_confirmed else "error")
+        timing["visual_final_sec"] = round(visual_sec, 3)
+        timing["measurement_sec"] = round(time.monotonic() - total_started, 3)
+        if self.fps_plan_confirmed:
+            state = "OK_VERIFICADO"
+            reason = "duration_audio_drift_and_visual_match"
+            contradictions = []
+        else:
+            state = "FPS_NO_CONFIRMADOS"
+            reason = confirmation.get("reason") or "fps_no_confirmados"
+            contradictions = ["fps_plan_not_confirmed"]
+        return self.finish_hybrid_result(
+            state,
+            provisional_delay,
+            visual,
+            audio,
+            reason,
+            contradictions,
+            timing,
+            ref_index,
+            esp_index,
+            stage="fps_provisional",
         )
 
     def run_hybrid_discovery(
@@ -1044,6 +1261,23 @@ class DelayAudio:
             "duration_sec": round(discovery_sec, 3),
         })
 
+        if self.fps_plan_enabled and self.fps_plan_provisional and not self.fps_plan_confirmed:
+            return self.finish_provisional_fps_discovery(
+                duration_ref,
+                ref_index,
+                esp_index,
+                settings,
+                clusters,
+                ranked_public,
+                rows,
+                zones_run,
+                expanded,
+                expansion_reason,
+                timing,
+                total_started,
+                discovery_sec,
+            )
+
         if not candidates:
             candidates = [0]
         verifier = self.create_visual_verifier()
@@ -1228,6 +1462,24 @@ class DelayAudio:
 
     def run_hybrid_fast_path(self, duration_ref, duration_esp, ref_index, esp_index):
         total_started = time.monotonic()
+        if self.fps_plan_enabled and self.fps_plan_provisional and not self.fps_plan_confirmed:
+            timing = {
+                "metadata_sec": 0.0,
+                "visual_fast_path_sec": 0.0,
+                "audio_narrow_sec": 0.0,
+                "measurement_sec": 0.0,
+            }
+            return self.run_hybrid_discovery(
+                duration_ref,
+                duration_esp,
+                ref_index,
+                esp_index,
+                {"verified": False, "reason": "fps_audio_must_precede_visual"},
+                {"supporting_zones": 0, "results": []},
+                timing,
+                total_started,
+                "fps_provisional_audio_first",
+            )
         candidates = [0]
         if self.delay_hint_ms != 0:
             candidates.append(self.delay_hint_ms)
@@ -1516,6 +1768,7 @@ class DelayAudio:
             "hybrid_enabled": self.hybrid_enabled,
             "fps_plan": {
                 "planned": self.fps_plan_enabled,
+                "provisional": self.fps_plan_provisional,
                 "confirmed": self.fps_plan_confirmed,
                 "ref_fps": self.fps_ref,
                 "esp_fps": self.fps_esp,
@@ -1785,7 +2038,9 @@ def main():
     parser.add_argument("--fps-esp", type=float, default=0.0)
     parser.add_argument("--fps-tempo", type=float, default=1.0)
     parser.add_argument("--fps-plan-enabled", action="store_true")
+    parser.add_argument("--fps-plan-provisional", action="store_true")
     parser.add_argument("--fps-plan-confirmed", action="store_true")
+    parser.add_argument("--fps-plan-context-json", type=hybrid_config_json_arg, default={})
     parser.add_argument("--hybrid-enabled", action="store_true")
     parser.add_argument("--hybrid-config-json", type=hybrid_config_json_arg, default={})
     args = parser.parse_args()
@@ -1802,7 +2057,9 @@ def main():
         args.fps_esp,
         args.fps_tempo,
         args.fps_plan_enabled,
+        args.fps_plan_provisional,
         args.fps_plan_confirmed,
+        args.fps_plan_context_json,
         args.hybrid_enabled,
         args.hybrid_config_json,
     ).run()

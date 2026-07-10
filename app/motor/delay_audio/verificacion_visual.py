@@ -684,6 +684,9 @@ class VisualVerifier:
         ref_fps: float | None = None,
         esp_fps: float | None = None,
         profile: str = "pelicula",
+        delay_ms: int | float = 0,
+        audio_evidence: dict[str, Any] | None = None,
+        provisional_only: bool = False,
     ) -> dict[str, Any]:
         started = time.monotonic()
         ref_meta = self.probe_video(ref_video)
@@ -703,17 +706,52 @@ class VisualVerifier:
         else:
             tolerance = max(1.5, ref_meta.duration * 0.0015)
         duration_match = duration_delta <= tolerance
+        vfr = ref_meta.variable_frame_rate or esp_meta.variable_frame_rate
+        provisional = bool(duration_match and not vfr)
+        duration_payload = {
+            "ref": round(ref_meta.duration, 6),
+            "esp": round(esp_meta.duration, 6),
+            "expected_ref": round(expected_ref_duration, 6),
+            "delta": round(duration_delta, 6),
+            "tolerance": round(tolerance, 6),
+            "match": duration_match,
+        }
+        if provisional_only:
+            if vfr:
+                reason = "vfr_no_confirmado"
+            elif not duration_match:
+                reason = "duracion_no_confirma_tempo"
+            else:
+                reason = "duration_ratio_provisional"
+            return {
+                "planned": True,
+                "provisional": provisional,
+                "enabled": provisional,
+                "confirmed": False,
+                "applied": False,
+                "reason": reason,
+                "ref_fps": round(ref_rate, 9),
+                "esp_fps": round(esp_rate, 9),
+                "tempo": round(tempo, 12),
+                "duration": duration_payload,
+                "visual": {},
+                "variable_frame_rate": vfr,
+                "duration_sec": round(time.monotonic() - started, 3),
+            }
+
         cfg = self.config(profile)
         zones = pick_zones(ref_meta.duration, profile, cfg)[:3]
         comparisons = []
-        planned_wins = 0
+        absolute_wins = 0
+        relative_wins = 0
         useful = 0
+        deltas = []
         for zone in zones:
             planned = self.score_candidate(
                 ref_video,
                 esp_video_original,
                 zone["start_sec"],
-                0,
+                delay_ms,
                 tempo,
                 profile,
                 ref_meta.duration,
@@ -723,7 +761,7 @@ class VisualVerifier:
                 ref_video,
                 esp_video_original,
                 zone["start_sec"],
-                0,
+                delay_ms,
                 1.0,
                 profile,
                 ref_meta.duration,
@@ -735,50 +773,70 @@ class VisualVerifier:
             if planned_score is not None and nominal_score is not None:
                 useful += 1
                 delta = float(planned_score) - float(nominal_score)
+                deltas.append(delta)
                 if planned_score >= float(cfg["visual_valid_min"]) and delta >= 0.02:
-                    planned_wins += 1
+                    absolute_wins += 1
+                if delta >= 0.05:
+                    relative_wins += 1
             comparisons.append({
                 "pct": zone["pct"],
                 "start_sec": zone["start_sec"],
+                "delay_ms": int(round(_finite_float(delay_ms))),
                 "planned_ssim": planned_score,
                 "nominal_ssim": nominal_score,
                 "delta": round(delta, 6) if delta is not None else None,
             })
 
-        visual_match = useful >= 2 and planned_wins >= 2
-        vfr = ref_meta.variable_frame_rate or esp_meta.variable_frame_rate
-        confirmed = bool(duration_match and visual_match and not vfr)
+        mean_delta = sum(deltas) / len(deltas) if deltas else 0.0
+        contradictory_zones = sum(1 for delta in deltas if delta <= 0.0)
+        absolute_match = useful >= 2 and absolute_wins >= 2
+        relative_match = bool(
+            useful >= 2
+            and relative_wins >= 2
+            and mean_delta >= 0.08
+            and contradictory_zones == 0
+        )
+        visual_match = bool(absolute_match or relative_match)
+        audio_stable = bool(isinstance(audio_evidence, dict) and audio_evidence.get("stable") is True)
+        confirmed = bool(provisional and audio_stable and visual_match)
         if vfr:
             reason = "vfr_no_confirmado"
         elif not duration_match:
             reason = "duracion_no_confirma_tempo"
+        elif not audio_stable:
+            reason = "audio_corregido_no_confirma_tempo"
         elif not visual_match:
             reason = "imagen_no_confirma_tempo"
         else:
-            reason = "duration_ratio_and_visual_match"
+            reason = "duration_audio_drift_and_visual_match"
         return {
             "planned": True,
-            "enabled": True,
+            "provisional": provisional,
+            "enabled": confirmed,
             "confirmed": confirmed,
-            "applied": False,
+            "applied": confirmed,
             "reason": reason,
             "ref_fps": round(ref_rate, 9),
             "esp_fps": round(esp_rate, 9),
             "tempo": round(tempo, 12),
-            "duration": {
-                "ref": round(ref_meta.duration, 6),
-                "esp": round(esp_meta.duration, 6),
-                "expected_ref": round(expected_ref_duration, 6),
-                "delta": round(duration_delta, 6),
-                "tolerance": round(tolerance, 6),
-                "match": duration_match,
-            },
+            "duration": duration_payload,
             "visual": {
+                "verified": confirmed,
+                "delay_ms": int(round(_finite_float(delay_ms))),
                 "useful_zones": useful,
-                "planned_wins": planned_wins,
+                "zones_attempted": len(comparisons),
+                "zones_valid": useful,
+                "planned_wins": max(absolute_wins, relative_wins),
+                "absolute_wins": absolute_wins,
+                "relative_wins": relative_wins,
+                "absolute_match": absolute_match,
+                "relative_match": relative_match,
+                "mean_delta": round(mean_delta, 6),
+                "contradictory_zones": contradictory_zones,
                 "match": visual_match,
                 "comparisons": comparisons,
             },
+            "audio": dict(audio_evidence or {}),
             "variable_frame_rate": vfr,
             "duration_sec": round(time.monotonic() - started, 3),
         }
@@ -836,6 +894,7 @@ def _fps_result(
 ) -> dict[str, Any]:
     return {
         "planned": planned,
+        "provisional": False,
         "enabled": enabled,
         "confirmed": confirmed,
         "applied": False,
@@ -861,6 +920,8 @@ def main() -> int:
     parser.add_argument("--tempo", type=float, default=1.0)
     parser.add_argument("--fps-ref", type=float)
     parser.add_argument("--fps-esp", type=float)
+    parser.add_argument("--delay-ms", type=int, default=0)
+    parser.add_argument("--provisional-only", action="store_true")
     parser.add_argument("--profile-config-json", type=_profile_config_json_arg, default={})
     args = parser.parse_args()
     visual_overrides = visual_overrides_from_profile_config(args.profile_config_json)
@@ -873,6 +934,9 @@ def main() -> int:
                 args.fps_ref,
                 args.fps_esp,
                 args.profile,
+                args.delay_ms,
+                None,
+                args.provisional_only,
             )
         else:
             candidates = [int(round(float(value))) for value in args.candidate_ms] or [0]
