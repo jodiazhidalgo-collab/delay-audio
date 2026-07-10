@@ -103,6 +103,19 @@ class DelayAudio:
             json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
         os.replace(tmp_path, self.progress_path)
 
+    @staticmethod
+    def is_expected_zone_rejection(exc):
+        """Distingue contenido no útil de un fallo técnico de medición."""
+        text = str(exc or "").lower()
+        return any(phrase in text for phrase in (
+            "audio temporal demasiado pequeno",
+            "audio temporal demasiado pequeño",
+            "muy poco audio para analizar",
+            "audio demasiado corto para busqueda gruesa",
+            "audio demasiado corto para búsqueda gruesa",
+            "audio casi plano o silencioso",
+        ))
+
     def run_cmd(self, cmd, timeout=None):
         phase = self.command_phase(cmd)
         started_at = time.time()
@@ -321,11 +334,15 @@ class DelayAudio:
         esp_index,
         work_dir,
         segment_sec=None,
+        esp_segment_sec=None,
         search_center_ms=None,
         search_radius_ms=None,
+        residual_min_ms=None,
+        residual_max_ms=None,
         esp_start_sec=None,
     ):
         segment_sec = float(self.segment_sec if segment_sec is None else segment_sec)
+        esp_segment_sec = float(segment_sec if esp_segment_sec is None else esp_segment_sec)
         ref_start_sec = max(0.0, float(start_sec))
         if esp_start_sec is None:
             esp_start_sec = ref_start_sec
@@ -347,7 +364,7 @@ class DelayAudio:
             esp_index,
             esp_start_sec,
             f"AUDIO ESPANOL zona {zone_number}",
-            duration_sec=segment_sec,
+            duration_sec=esp_segment_sec,
         )
 
         ref_env = self.get_envelope_20ms(ref_raw)
@@ -368,11 +385,26 @@ class DelayAudio:
         esp_coarse_2 = normalize(downsample(esp_der, COARSE_FACTOR))
 
         coarse_frame_ms = FINE_FRAME_MS * COARSE_FACTOR
-        explicit_radius_ms = max(FINE_FRAME_MS, int(abs(search_radius_ms or 0)))
+        explicit_residual_min_ms = int(residual_min_ms) if residual_min_ms is not None else None
+        explicit_residual_max_ms = int(residual_max_ms) if residual_max_ms is not None else None
+        if explicit_residual_min_ms is not None and explicit_residual_max_ms is not None:
+            if explicit_residual_min_ms > explicit_residual_max_ms:
+                raise RuntimeError("Rango residual de audio inválido")
+            explicit_radius_ms = max(
+                FINE_FRAME_MS,
+                abs(explicit_residual_min_ms),
+                abs(explicit_residual_max_ms),
+            )
+        else:
+            explicit_radius_ms = max(FINE_FRAME_MS, int(abs(search_radius_ms or 0)))
         if search_center_ms is not None:
             max_coarse_lag = max(1, round(explicit_radius_ms / coarse_frame_ms))
-            coarse_min = -max_coarse_lag
-            coarse_max = max_coarse_lag
+            if explicit_residual_min_ms is not None and explicit_residual_max_ms is not None:
+                coarse_min = math.floor(explicit_residual_min_ms / coarse_frame_ms)
+                coarse_max = math.ceil(explicit_residual_max_ms / coarse_frame_ms)
+            else:
+                coarse_min = -max_coarse_lag
+                coarse_max = max_coarse_lag
         else:
             max_coarse_lag = round((self.max_delay_sec * 1000.0) / coarse_frame_ms)
         if search_center_ms is None and self.delay_hint_ms != 0:
@@ -395,13 +427,19 @@ class DelayAudio:
         center_fine_lag = int(coarse["lag"] * COARSE_FACTOR)
         fine_radius_ms = min(2500.0, float(explicit_radius_ms)) if search_center_ms is not None else 2500.0
         fine_radius = max(1, round(fine_radius_ms / FINE_FRAME_MS))
-        max_fine_lag = (
-            max(1, round(float(explicit_radius_ms) / FINE_FRAME_MS))
-            if search_center_ms is not None
-            else round((self.max_delay_sec * 1000.0) / FINE_FRAME_MS)
-        )
-        fine_min = max(-max_fine_lag, center_fine_lag - fine_radius)
-        fine_max = min(max_fine_lag, center_fine_lag + fine_radius)
+        if search_center_ms is not None and explicit_residual_min_ms is not None and explicit_residual_max_ms is not None:
+            fine_bound_min = math.floor(explicit_residual_min_ms / FINE_FRAME_MS)
+            fine_bound_max = math.ceil(explicit_residual_max_ms / FINE_FRAME_MS)
+        else:
+            max_fine_lag = (
+                max(1, round(float(explicit_radius_ms) / FINE_FRAME_MS))
+                if search_center_ms is not None
+                else round((self.max_delay_sec * 1000.0) / FINE_FRAME_MS)
+            )
+            fine_bound_min = -max_fine_lag
+            fine_bound_max = max_fine_lag
+        fine_min = max(fine_bound_min, center_fine_lag - fine_radius)
+        fine_max = min(fine_bound_max, center_fine_lag + fine_radius)
         fine = find_best_lag_range(ref_fine_1, esp_fine_1, ref_fine_2, esp_fine_2, fine_min, fine_max)
 
         residual_delay_ms = round(fine["lag"] * FINE_FRAME_MS)
@@ -428,8 +466,8 @@ class DelayAudio:
             "confidence": confidence,
             "delay_hint_ms": int(self.delay_hint_ms),
             "search_center_ms": effective_center_ms if search_center_ms is not None else 0,
-            "search_min_ms": int(effective_center_ms + coarse_min * coarse_frame_ms) if search_center_ms is not None else int(coarse_min * coarse_frame_ms),
-            "search_max_ms": int(effective_center_ms + coarse_max * coarse_frame_ms) if search_center_ms is not None else int(coarse_max * coarse_frame_ms),
+            "search_min_ms": int(effective_center_ms + (explicit_residual_min_ms if explicit_residual_min_ms is not None else coarse_min * coarse_frame_ms)) if search_center_ms is not None else int(coarse_min * coarse_frame_ms),
+            "search_max_ms": int(effective_center_ms + (explicit_residual_max_ms if explicit_residual_max_ms is not None else coarse_max * coarse_frame_ms)) if search_center_ms is not None else int(coarse_max * coarse_frame_ms),
         }
         with open(self.csv_path, "a", encoding="utf-8") as f:
             f.write(
@@ -462,6 +500,89 @@ class DelayAudio:
             "avg_score_min": 0.38,
             "strong_score_min": 0.48,
         }
+
+    def discovery_audio_settings(self, duration_sec):
+        duration = max(1.0, float(duration_sec))
+        if self.profile == "trailer":
+            segment = min(12.0, max(8.0, duration * 0.12))
+            if duration <= segment + 0.5:
+                segment = max(2.0, duration - 0.5)
+            required_span = segment * 0.45 * 2.0
+            radius = min(
+                12.0,
+                duration * 0.20,
+                max(0.0, (duration - segment - required_span - 0.1) / 2.0),
+            )
+            return {
+                "initial_zone_pcts": [20.0, 50.0, 80.0],
+                "extra_zone_pcts": [35.0, 65.0, 90.0],
+                "segment_sec": segment,
+                "radius_ms": max(500, int(round(radius * 1000.0))),
+                "tolerance_ms": 120,
+                "score_min": 0.18,
+                "support_avg_min": 0.38,
+                "support_strong_min": 0.48,
+                "max_audio_zones": 6,
+                "max_visual_candidates": 4,
+            }
+        segment = min(40.0, max(12.0, duration - 0.5))
+        required_span = segment * 0.45 * 3.0
+        radius = min(45.0, max(0.0, (duration - segment - required_span - 0.1) / 2.0))
+        return {
+            "initial_zone_pcts": [12.0, 37.0, 63.0, 88.0],
+            "extra_zone_pcts": [22.0, 50.0, 78.0, 95.0],
+            "segment_sec": segment,
+            "radius_ms": max(1000, int(round(radius * 1000.0))),
+            "tolerance_ms": 160,
+            "score_min": 0.18,
+            "support_avg_min": 0.38,
+            "support_strong_min": 0.48,
+            "max_audio_zones": 8,
+            "max_visual_candidates": 4,
+        }
+
+    @staticmethod
+    def build_discovery_audio_zones(duration_ref, duration_esp, settings, zone_pcts, existing=None):
+        segment = float(settings["segment_sec"])
+        radius_sec = float(settings["radius_ms"]) / 1000.0
+        min_start = radius_sec
+        max_start = min(
+            max(0.0, float(duration_ref) - segment - 0.05),
+            max(0.0, float(duration_esp) - segment - radius_sec - 0.05),
+        )
+        if max_start < min_start:
+            return []
+        zones = []
+        known = list(existing or [])
+        minimum_gap = segment * 0.45
+        for pct in zone_pcts:
+            ref_start = max(min_start, min(max_start, float(duration_ref) * float(pct) / 100.0))
+            esp_start = ref_start - radius_sec
+            if any(
+                abs(ref_start - item["ref_start_sec"]) < minimum_gap
+                or abs(esp_start - item["esp_start_sec"]) < minimum_gap
+                for item in known + zones
+            ):
+                continue
+            zones.append({
+                "pct": float(pct),
+                "ref_start_sec": round(ref_start, 6),
+                "esp_start_sec": round(esp_start, 6),
+                "esp_segment_sec": round(segment + (radius_sec * 2.0), 6),
+            })
+        return zones
+
+    @staticmethod
+    def rank_visual_candidates(clusters, delay_hint_ms=0, limit=4):
+        candidates = []
+        for cluster in clusters[:2]:
+            delay = int(cluster.get("delay_ms") or 0)
+            if delay not in candidates:
+                candidates.append(delay)
+        for delay in (0, int(delay_hint_ms or 0)):
+            if delay not in candidates:
+                candidates.append(delay)
+        return candidates[:max(1, int(limit))]
 
     @staticmethod
     def build_fast_audio_zones(duration_ref, duration_esp, segment_sec, center_ms, zone_pcts):
@@ -510,7 +631,13 @@ class DelayAudio:
         for row in sorted(usable, key=lambda item: int(item.get("delay_ms") or 0)):
             target = None
             for cluster in clusters:
-                if abs(int(row.get("delay_ms") or 0) - float(cluster["center"])) <= int(tolerance_ms):
+                candidate_delay = int(row.get("delay_ms") or 0)
+                cluster_delays = [int(item.get("delay_ms") or 0) for item in cluster["items"]]
+                if (
+                    abs(candidate_delay - float(cluster["center"])) <= int(tolerance_ms)
+                    and max(cluster_delays + [candidate_delay]) - min(cluster_delays + [candidate_delay])
+                    <= int(tolerance_ms)
+                ):
                     target = cluster
                     break
             if target is None:
@@ -524,10 +651,12 @@ class DelayAudio:
         ranked = []
         for cluster in clusters:
             items = cluster["items"]
+            delays = [int(item.get("delay_ms") or 0) for item in items]
             ranked.append({
                 "delay_ms": int(round(cluster["center"])),
                 "count": len(items),
                 "avg_score": sum(float(item.get("score") or 0.0) for item in items) / len(items),
+                "spread_ms": max(delays) - min(delays),
                 "items": items,
             })
         return sorted(ranked, key=lambda item: (item["count"], item["avg_score"]), reverse=True)
@@ -563,6 +692,7 @@ class DelayAudio:
         timing,
         ref_index,
         esp_index,
+        stage="fast_path",
     ):
         verified = state == "OK_VERIFICADO"
         rows = list(audio.get("results") or [])
@@ -581,7 +711,7 @@ class DelayAudio:
                 "contradictions": list(contradictions or []),
             },
             "profile": self.profile,
-            "stage": "fast_path",
+            "stage": stage,
             "zones_count": int(audio.get("supporting_zones") or 0),
             "avg_score": (sum(scores) / len(scores)) if scores else 0.0,
             "results": rows,
@@ -608,6 +738,369 @@ class DelayAudio:
     def create_visual_verifier(self):
         return VisualVerifier(
             event_callback=lambda phase, event, data: self.diag.event(phase, event, "Verificación visual", data)
+        )
+
+    def run_hybrid_discovery(
+        self,
+        duration_ref,
+        duration_esp,
+        ref_index,
+        esp_index,
+        fast_visual,
+        fast_audio,
+        timing,
+        total_started,
+        initial_reason,
+    ):
+        settings = self.discovery_audio_settings(min(duration_ref, duration_esp))
+        initial_zones = self.build_discovery_audio_zones(
+            duration_ref,
+            duration_esp,
+            settings,
+            settings["initial_zone_pcts"],
+        )
+        if len(initial_zones) < 2:
+            visual = dict(fast_visual or {})
+            visual["verified"] = False
+            audio = {
+                "method": "legacy_correlation_discovery_v1",
+                "supporting_zones": 0,
+                "zones_attempted": 0,
+                "results": [],
+                "fast_path": {
+                    "supporting_zones": int((fast_audio or {}).get("supporting_zones") or 0),
+                    "reason": initial_reason,
+                },
+            }
+            timing["audio_discovery_sec"] = 0.0
+            timing["visual_final_sec"] = 0.0
+            timing["measurement_sec"] = round(time.monotonic() - total_started, 3)
+            return self.finish_hybrid_result(
+                "SIN_ZONAS_VALIDAS",
+                0,
+                visual,
+                audio,
+                "descubrimiento_sin_dos_zonas_independientes",
+                ["insufficient_discovery_zones"],
+                timing,
+                ref_index,
+                esp_index,
+                stage="adaptive_discovery",
+            )
+
+        work_dir = os.path.join(self.job_dir, "tmp")
+        self.remove_work_dir_checked(work_dir)
+        os.makedirs(work_dir, exist_ok=True)
+        discovery_started = time.monotonic()
+        rows = []
+        zones_run = []
+        expanded = False
+        expansion_reason = ""
+        self.diag.event("audio_discovery", "started", "Descubrimiento de candidatos iniciado", {
+            "profile": self.profile,
+            "initial_reason": initial_reason,
+            "zone_pcts": settings["initial_zone_pcts"],
+            "segment_sec": settings["segment_sec"],
+            "radius_ms": settings["radius_ms"],
+            "tolerance_ms": settings["tolerance_ms"],
+        })
+
+        def measure_zones(zones):
+            start_index = len(zones_run)
+            for offset, zone in enumerate(zones, 1):
+                index = start_index + offset
+                if index > int(settings["max_audio_zones"]):
+                    break
+                zones_run.append(zone)
+                radius_ms = int(settings["radius_ms"])
+                center_ms = int(round((zone["ref_start_sec"] - zone["esp_start_sec"]) * 1000.0))
+                residual_min_ms = -radius_ms - center_ms
+                residual_max_ms = radius_ms - center_ms
+                self.write_progress(
+                    "audio_discovery",
+                    min(95, (index / int(settings["max_audio_zones"])) * 100),
+                    "Buscando",
+                    int(settings["max_audio_zones"]),
+                    index - 1,
+                )
+                self.diag.event("audio_discovery", "zone_started", "Midiendo zona de descubrimiento", {
+                    "zone": index,
+                    "pct": zone["pct"],
+                    "ref_start_sec": zone["ref_start_sec"],
+                    "esp_start_sec": zone["esp_start_sec"],
+                    "search_min_ms": -radius_ms,
+                    "search_max_ms": radius_ms,
+                })
+                try:
+                    row = self.analyze_zone(
+                        index,
+                        zone["ref_start_sec"],
+                        ref_index,
+                        esp_index,
+                        work_dir,
+                        segment_sec=settings["segment_sec"],
+                        esp_segment_sec=zone["esp_segment_sec"],
+                        search_center_ms=center_ms,
+                        search_radius_ms=radius_ms,
+                        residual_min_ms=residual_min_ms,
+                        residual_max_ms=residual_max_ms,
+                        esp_start_sec=zone["esp_start_sec"],
+                    )
+                    row["discovery_pct"] = zone["pct"]
+                    rows.append(row)
+                    self.diag.event("audio_discovery", "zone_finished", "Zona de descubrimiento medida", row)
+                except Exception as exc:
+                    self.log(f"ERROR DESCUBRIMIENTO ZONA {index}: {exc}")
+                    self.diag.error(classify_error(str(exc)), "audio_discovery", "Zona de descubrimiento fallida", {
+                        "zone": index,
+                        "error": str(exc),
+                    }, exc)
+                    if not self.is_expected_zone_rejection(exc):
+                        raise RuntimeError(
+                            f"Fallo técnico en zona de descubrimiento {index}: {exc}"
+                        ) from exc
+
+        try:
+            measure_zones(initial_zones)
+            clusters = self.cluster_audio_rows(rows, settings["tolerance_ms"], settings["score_min"])
+            top_count = int(clusters[0]["count"]) if clusters else 0
+            tied_top = bool(len(clusters) > 1 and int(clusters[1]["count"]) == top_count)
+            if top_count < 2 or tied_top:
+                expansion_reason = "sin_cluster_repetido" if top_count < 2 else "clusters_empatados"
+                extra_zones = self.build_discovery_audio_zones(
+                    duration_ref,
+                    duration_esp,
+                    settings,
+                    settings["extra_zone_pcts"],
+                    existing=zones_run,
+                )
+                remaining = max(0, int(settings["max_audio_zones"]) - len(zones_run))
+                extra_zones = extra_zones[:remaining]
+                for extra_index, extra_zone in enumerate(extra_zones, 1):
+                    current_clusters = self.cluster_audio_rows(
+                        rows,
+                        settings["tolerance_ms"],
+                        settings["score_min"],
+                    )
+                    current_top_count = int(current_clusters[0]["count"]) if current_clusters else 0
+                    current_tied_top = bool(
+                        len(current_clusters) > 1
+                        and int(current_clusters[1]["count"]) == current_top_count
+                    )
+                    if current_top_count >= 3 and not current_tied_top:
+                        break
+                    if current_top_count < 2:
+                        expansion_reason = "sin_cluster_repetido"
+                    elif current_tied_top:
+                        expansion_reason = "clusters_empatados"
+                    else:
+                        expansion_reason = "corroboracion_insuficiente"
+                    expanded = True
+                    self.diag.event("audio_discovery", "expanded", "Se amplía por una duda concreta", {
+                        "reason": expansion_reason,
+                        "extra_zone": extra_index,
+                        "zones_attempted_before": len(zones_run),
+                        "max_audio_zones": settings["max_audio_zones"],
+                    })
+                    measure_zones([extra_zone])
+            clusters = self.cluster_audio_rows(rows, settings["tolerance_ms"], settings["score_min"])
+        finally:
+            self.remove_work_dir_checked(work_dir)
+            self.diag.event("cleanup", "remove_discovery_tmp", "Temporales de descubrimiento eliminados", {
+                "work_dir": work_dir,
+            })
+
+        discovery_sec = time.monotonic() - discovery_started
+        ranked_public = []
+        for rank, cluster in enumerate(clusters, 1):
+            public = {key: value for key, value in cluster.items() if key != "items"}
+            public["rank"] = rank
+            ranked_public.append(public)
+            self.diag.event("audio_discovery", "candidate_ranked", "Candidato de audio ordenado", public)
+        candidates = self.rank_visual_candidates(
+            clusters,
+            self.delay_hint_ms,
+            settings["max_visual_candidates"],
+        )
+        self.diag.event("audio_discovery", "finished", "Descubrimiento de candidatos terminado", {
+            "zones_attempted": len(zones_run),
+            "zones_measured": len(rows),
+            "expanded": expanded,
+            "expansion_reason": expansion_reason,
+            "candidate_delays_ms": candidates,
+            "duration_sec": round(discovery_sec, 3),
+        })
+
+        if not candidates:
+            candidates = [0]
+        verifier = self.create_visual_verifier()
+        visual_started = time.monotonic()
+        tempo = self.fps_tempo if self.fps_plan_enabled else 1.0
+        visual = verifier.score_candidates(
+            self.ref_file,
+            self.esp_video_original,
+            candidates,
+            profile=self.profile,
+            tempo=tempo,
+            stage="visual_final",
+        )
+        visual = dict(visual)
+        visual["verified"] = bool(visual.get("strong_winner"))
+        visual["fast_path"] = {
+            "winner_delay_ms": (fast_visual or {}).get("winner_delay_ms"),
+            "strong_winner": bool((fast_visual or {}).get("strong_winner")),
+            "zones_valid": int((fast_visual or {}).get("zones_valid") or 0),
+            "reason": initial_reason,
+        }
+        for candidate in visual.get("candidates") or []:
+            self.diag.event("visual_final", "candidate_scored", "Candidato visual final puntuado", candidate)
+        visual_final_sec = time.monotonic() - visual_started
+
+        tolerance_ms = int(settings["tolerance_ms"])
+        visual_winner = visual.get("winner_delay_ms")
+        matching_clusters = []
+        if visual_winner is not None:
+            matching_clusters = [
+                cluster for cluster in clusters
+                if abs(int(cluster["delay_ms"]) - int(visual_winner)) <= tolerance_ms
+            ]
+        support_cluster = matching_clusters[0] if matching_clusters else None
+        top_cluster = clusters[0] if clusters else None
+        supporting_rows = list((support_cluster or {}).get("items") or [])
+        support_count = int((support_cluster or {}).get("count") or 0)
+        support_avg = float((support_cluster or {}).get("avg_score") or 0.0)
+        support_spread = int((support_cluster or {}).get("spread_ms") or 0)
+        support_strong = sum(
+            1 for row in supporting_rows
+            if float(row.get("score") or 0.0) >= float(settings["support_strong_min"])
+        )
+        unique_audio_top = bool(
+            support_cluster is not None
+            and top_cluster is support_cluster
+            and (
+                len(clusters) < 2
+                or int(clusters[0]["count"]) > int(clusters[1]["count"])
+            )
+        )
+        required_support = 3 if expanded else 2
+        audio_support_ok = bool(
+            support_count >= required_support
+            and support_avg >= float(settings["support_avg_min"])
+            and support_strong >= 1
+            and support_spread <= tolerance_ms
+            and unique_audio_top
+        )
+        contradictions = []
+        if not visual.get("strong_winner"):
+            contradictions.append("visual_final_not_strong")
+        if not audio_support_ok:
+            contradictions.append("audio_does_not_support_visual_winner")
+        if support_cluster is not None and top_cluster is not support_cluster:
+            contradictions.append("stronger_audio_candidate_disagrees")
+        if support_cluster is not None and top_cluster is support_cluster and not unique_audio_top:
+            contradictions.append("audio_top_clusters_ambiguous")
+        if self.fps_plan_enabled and not self.fps_plan_confirmed:
+            contradictions.append("fps_plan_not_confirmed")
+
+        usable_delays = [
+            int(row["delay_ms"])
+            for row in rows
+            if float(row.get("score") or 0.0) >= float(settings["score_min"])
+        ]
+        audio_spread = max(usable_delays) - min(usable_delays) if len(usable_delays) >= 2 else 0
+        valid_visual_winners = {
+            int(zone["winner_delay_ms"])
+            for zone in visual.get("zones") or []
+            if zone.get("state") in {"FUERTE", "VALIDA"} and zone.get("winner_delay_ms") is not None
+        }
+        repeated_audio_clusters = [
+            cluster for cluster in clusters
+            if int(cluster.get("count") or 0) >= 2
+            and float(cluster.get("avg_score") or 0.0) >= float(settings["support_avg_min"])
+            and any(
+                float(item.get("score") or 0.0) >= float(settings["support_strong_min"])
+                for item in cluster.get("items") or []
+            )
+        ]
+        multiple_repeated_audio_delays = any(
+            abs(int(left["delay_ms"]) - int(right["delay_ms"])) > tolerance_ms
+            for index, left in enumerate(repeated_audio_clusters)
+            for right in repeated_audio_clusters[index + 1:]
+        )
+        mounting_different = bool(
+            len(valid_visual_winners) >= 2
+            or multiple_repeated_audio_delays
+            or (
+                len(usable_delays) >= 3
+                and int((top_cluster or {}).get("count") or 0) < 2
+                and audio_spread > max(1000, tolerance_ms * 5)
+            )
+        )
+        if multiple_repeated_audio_delays:
+            contradictions.append("multiple_repeated_audio_delays")
+        if len(valid_visual_winners) >= 2:
+            contradictions.append("multiple_visual_delays")
+        if visual.get("strong_winner") and audio_support_ok and not contradictions:
+            state = "OK_VERIFICADO"
+            reason = "descubrimiento_audio_y_visual_coinciden"
+            final_delay = int(support_cluster["delay_ms"])
+            contradictions = []
+        elif mounting_different:
+            state = "MONTAJE_DISTINTO"
+            reason = "ningun_delay_fijo_explica_las_zonas"
+            final_delay = int((top_cluster or {}).get("delay_ms") or 0)
+        elif visual.get("strong_winner"):
+            state = "AUDIO_VIDEO_ORIGEN_DUDOSO"
+            reason = "imagen_alinea_pero_audio_no_sostiene_el_mismo_origen"
+            final_delay = int(visual_winner or 0)
+        elif not rows and int(visual.get("zones_valid") or 0) == 0:
+            state = "SIN_ZONAS_VALIDAS"
+            reason = "sin_zonas_utiles_en_audio_o_imagen"
+            final_delay = 0
+        else:
+            state = "NO_FIABLE"
+            reason = "descubrimiento_sin_evidencia_suficiente"
+            final_delay = int(visual_winner if visual_winner is not None else (top_cluster or {}).get("delay_ms") or 0)
+
+        coherent_cluster = top_cluster or {"delay_ms": 0, "count": 0, "avg_score": 0.0, "items": []}
+        audio = {
+            "method": "legacy_correlation_discovery_v1",
+            "delay_ms": int(coherent_cluster["delay_ms"]),
+            "supporting_zones": int(coherent_cluster["count"]),
+            "visual_supporting_zones": support_count,
+            "strong_zones": support_strong,
+            "avg_score": float(coherent_cluster["avg_score"]),
+            "zones_attempted": len(zones_run),
+            "zones_measured": len(rows),
+            "segment_sec": settings["segment_sec"],
+            "radius_ms": settings["radius_ms"],
+            "tolerance_ms": tolerance_ms,
+            "required_supporting_zones": required_support,
+            "expanded": expanded,
+            "expansion_reason": expansion_reason,
+            "candidate_delays_ms": candidates,
+            "clusters": ranked_public,
+            "results": rows,
+            "fast_path": {
+                "candidate_delay_ms": (fast_audio or {}).get("candidate_delay_ms"),
+                "supporting_zones": int((fast_audio or {}).get("supporting_zones") or 0),
+                "reason": initial_reason,
+            },
+        }
+        timing["audio_discovery_sec"] = round(discovery_sec, 3)
+        timing["visual_final_sec"] = round(visual_final_sec, 3)
+        timing["measurement_sec"] = round(time.monotonic() - total_started, 3)
+        return self.finish_hybrid_result(
+            state,
+            final_delay,
+            visual,
+            audio,
+            reason,
+            contradictions,
+            timing,
+            ref_index,
+            esp_index,
+            stage="adaptive_discovery",
         )
 
     def run_hybrid_fast_path(self, duration_ref, duration_esp, ref_index, esp_index):
@@ -643,17 +1136,16 @@ class DelayAudio:
         }
         winner_delay = visual.get("winner_delay_ms")
         if winner_delay is None or not visual.get("strong_winner"):
-            state = "SIN_ZONAS_VALIDAS" if int(visual.get("zones_valid") or 0) == 0 else "NO_FIABLE"
-            return self.finish_hybrid_result(
-                state,
-                0,
-                visual,
-                empty_audio,
-                "visual_fast_path_sin_ganador_fuerte",
-                ["visual_candidate_not_strong"],
-                timing,
+            return self.run_hybrid_discovery(
+                duration_ref,
+                duration_esp,
                 ref_index,
                 esp_index,
+                visual,
+                empty_audio,
+                timing,
+                total_started,
+                "visual_fast_path_sin_ganador_fuerte",
             )
 
         winner_delay = int(winner_delay)
@@ -667,16 +1159,16 @@ class DelayAudio:
             settings["zone_pcts"],
         )
         if len(zones) < 2:
-            return self.finish_hybrid_result(
-                "SIN_ZONAS_VALIDAS",
-                winner_delay,
-                visual,
-                empty_audio,
-                "audio_estrecho_sin_dos_zonas",
-                ["insufficient_audio_zones"],
-                timing,
+            return self.run_hybrid_discovery(
+                duration_ref,
+                duration_esp,
                 ref_index,
                 esp_index,
+                visual,
+                empty_audio,
+                timing,
+                total_started,
+                "audio_estrecho_sin_dos_zonas",
             )
 
         work_dir = os.path.join(self.job_dir, "tmp")
@@ -715,6 +1207,10 @@ class DelayAudio:
                         "zone": index,
                         "error": str(exc),
                     }, exc)
+                    if not self.is_expected_zone_rejection(exc):
+                        raise RuntimeError(
+                            f"Fallo técnico en zona de audio estrecho {index}: {exc}"
+                        ) from exc
                 self.write_progress("audio_narrow", (index / len(zones)) * 100, "Audio", len(zones), index)
         finally:
             self.remove_work_dir_checked(work_dir)
@@ -784,16 +1280,16 @@ class DelayAudio:
                 ref_index,
                 esp_index,
             )
-        return self.finish_hybrid_result(
-            "NO_FIABLE",
-            winner_delay,
-            visual,
-            audio,
-            "fast_path_audio_inconcluso",
-            contradictions or ["fast_path_not_verified"],
-            timing,
+        return self.run_hybrid_discovery(
+            duration_ref,
+            duration_esp,
             ref_index,
             esp_index,
+            visual,
+            audio,
+            timing,
+            total_started,
+            "fast_path_audio_inconcluso",
         )
 
     def recommended_delay(self, results):

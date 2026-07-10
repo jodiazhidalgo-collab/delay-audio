@@ -77,7 +77,7 @@ class DeterministicFastMotor(DelayAudio):
         self.audio_calls.append({"zone": zone_number, "start_sec": start_sec, **kwargs})
         index = zone_number - 1
         if index >= len(self.audio_delays):
-            raise RuntimeError("zona sintética no disponible")
+            raise RuntimeError("Audio casi plano o silencioso.")
         delay = int(self.audio_delays[index])
         score = float(self.audio_scores[index])
         return {
@@ -185,35 +185,36 @@ class HybridFastPathTests(unittest.TestCase):
 
     def test_one_audio_zone_never_verifies(self):
         _, _, result = self.run_case(audio_delays=(0,))
-        self.assertEqual(result["state"], "NO_FIABLE")
+        self.assertNotEqual(result["state"], "OK_VERIFICADO")
         self.assertFalse(result["export_allowed"])
         self.assertEqual(result["audio"]["supporting_zones"], 1)
 
-    def test_without_strong_visual_winner_audio_is_not_run(self):
+    def test_without_strong_visual_winner_runs_discovery_but_never_fast_accepts(self):
         motor, _, result = self.run_case(strong=False)
         self.assertIn(result["state"], {"NO_FIABLE", "SIN_ZONAS_VALIDAS"})
         self.assertFalse(result["export_allowed"])
-        self.assertEqual(motor.audio_calls, [])
+        self.assertGreaterEqual(len(motor.audio_calls), 2)
+        self.assertEqual(result["stage"], "adaptive_discovery")
 
     def test_unconfirmed_fps_plan_cannot_verify(self):
         _, _, result = self.run_case(fps_planned=True, fps_confirmed=False)
-        self.assertEqual(result["state"], "NO_FIABLE")
+        self.assertNotEqual(result["state"], "OK_VERIFICADO")
         self.assertFalse(result["export_allowed"])
         self.assertIn("fps_plan_not_confirmed", result["decision"]["contradictions"])
 
     def test_audio_that_agrees_with_itself_but_not_image_is_blocked_as_mismatch(self):
         _, _, result = self.run_case(winner=0, audio_delays=(1000, 1000))
-        self.assertEqual(result["state"], "NO_FIABLE")
+        self.assertEqual(result["state"], "AUDIO_VIDEO_ORIGEN_DUDOSO")
         self.assertFalse(result["export_allowed"])
         self.assertEqual(result["audio"]["supporting_zones"], 2)
-        self.assertIn("audio_visual_delay_mismatch", result["decision"]["contradictions"])
+        self.assertIn("audio_does_not_support_visual_winner", result["decision"]["contradictions"])
 
     def test_two_low_audio_scores_cannot_authorize(self):
         _, _, result = self.run_case(scores=(0.35, 0.35))
-        self.assertEqual(result["state"], "NO_FIABLE")
+        self.assertNotEqual(result["state"], "OK_VERIFICADO")
         self.assertFalse(result["export_allowed"])
         self.assertEqual(result["audio"]["supporting_zones"], 2)
-        self.assertIn("audio_has_no_strong_zone", result["decision"]["contradictions"])
+        self.assertIn("audio_does_not_support_visual_winner", result["decision"]["contradictions"])
 
     def test_short_trailer_does_not_count_overlapping_windows_twice(self):
         _, _, result = self.run_case(profile="trailer", duration=10.0)

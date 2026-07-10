@@ -101,6 +101,38 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(ranked[1]["wins"], 0)
 
 
+class FailingVisualVerifier(VisualVerifier):
+    def _run_ssim(self, *args, **kwargs):
+        raise RuntimeError("ffmpeg visual simulado falló")
+
+
+class VisualTechnicalErrorTests(unittest.TestCase):
+    def test_out_of_range_candidate_is_expected_rejection(self):
+        verifier = FailingVisualVerifier()
+        result = verifier.score_candidate(
+            "ref.mkv",
+            "esp.mkv",
+            0.0,
+            1000,
+            ref_duration=100.0,
+            esp_duration=100.0,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_kind"], "out_of_range")
+
+    def test_internal_ssim_failure_is_technical_error(self):
+        verifier = FailingVisualVerifier()
+        with self.assertRaisesRegex(RuntimeError, "Fallo técnico visual SSIM"):
+            verifier.score_candidate(
+                "ref.mkv",
+                "esp.mkv",
+                10.0,
+                0,
+                ref_duration=100.0,
+                esp_duration=100.0,
+            )
+
+
 class DeterministicFpsVerifier(VisualVerifier):
     def __init__(self, ref_meta, esp_meta, planned_score=0.95, nominal_score=0.40):
         super().__init__()

@@ -277,14 +277,17 @@ class VisualVerifier:
                 "command_sec": round(command_seconds, 3),
             }
         except Exception as exc:
-            return {
-                "ok": False,
-                "delay_ms": int(round(_finite_float(delay_ms))),
-                "ref_time": round(float(ref_time), 6),
-                "tempo": round(tempo_value, 9),
-                "error": str(exc),
-                "duration_sec": round(time.monotonic() - started, 3),
-            }
+            if isinstance(exc, ValueError) and "fuera de rango" in str(exc).lower():
+                return {
+                    "ok": False,
+                    "delay_ms": int(round(_finite_float(delay_ms))),
+                    "ref_time": round(float(ref_time), 6),
+                    "tempo": round(tempo_value, 9),
+                    "error_kind": "out_of_range",
+                    "error": str(exc),
+                    "duration_sec": round(time.monotonic() - started, 3),
+                }
+            raise RuntimeError(f"Fallo técnico visual SSIM: {exc}") from exc
 
     def _run_ssim(
         self,
