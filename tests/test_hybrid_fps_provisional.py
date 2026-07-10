@@ -73,7 +73,7 @@ class FpsPlanningDecisionTests(unittest.TestCase):
         result = self.confirm_pair(24.0, 25.0, 2588)
         self.assertAlmostEqual(result["tempo"], 0.96, places=9)
 
-    def test_duration_mismatch_rejects_before_visual_work(self):
+    def test_duration_mismatch_is_warning_without_visual_work(self):
         verifier = RelativeVisualVerifier(fake_meta("ref", 100.0, 24.0), fake_meta("esp", 100.0, 25.0))
         result = verifier.confirm_fps_plan(
             "ref-original.mkv",
@@ -83,8 +83,9 @@ class FpsPlanningDecisionTests(unittest.TestCase):
             "pelicula",
             provisional_only=True,
         )
-        self.assertFalse(result["provisional"])
-        self.assertEqual(result["reason"], "duracion_no_confirma_tempo")
+        self.assertTrue(result["provisional"])
+        self.assertFalse(result["duration"]["match"])
+        self.assertEqual(result["reason"], "duration_ratio_warning")
         self.assertEqual(verifier.calls, [])
 
     def test_vfr_rejects_before_visual_work(self):
@@ -256,15 +257,18 @@ class ProvisionalFpsMotorTests(unittest.TestCase):
         self.assertEqual(motor.visual_calls, [])
 
     def test_correct_hint_does_not_replace_measurement(self):
-        _, _, result = self.run_case(delay_ms=2588, hint=2000)
+        motor, _, result = self.run_case(delay_ms=2588, hint=2000)
         self.assertEqual(result["delay_ms"], 2588)
         self.assertEqual(result["audio"]["hint_ms"], 2000)
         self.assertFalse(result["audio"]["hint_is_measurement"])
+        self.assertTrue(result["edit_hint"]["hint_helped_fast_path"])
+        self.assertEqual(len(motor.audio_calls), 3)
 
     def test_wrong_hint_does_not_replace_measurement(self):
         _, _, result = self.run_case(delay_ms=2588, hint=-9000)
         self.assertEqual(result["delay_ms"], 2588)
         self.assertNotEqual(result["delay_ms"], -9000)
+        self.assertTrue(result["edit_hint"]["hint_rejected"])
 
     def test_visual_rejection_keeps_provisional_state_fail_closed(self):
         _, _, result = self.run_case(delay_ms=800, visual_confirm=False)

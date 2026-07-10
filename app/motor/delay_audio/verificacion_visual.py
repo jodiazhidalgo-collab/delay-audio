@@ -19,6 +19,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
+from measurement_core import build_measurement_core, core_zone_start, map_ref_to_esp_time
+
 
 SSIM_RE = re.compile(r"\bAll:([-+]?[0-9]*\.?[0-9]+)")
 FINAL_STATES = {"FUERTE", "VALIDA", "SOSPECHOSA", "INUTIL"}
@@ -111,11 +113,16 @@ def visual_overrides_from_profile_config(profile_config: Any) -> dict[str, Any]:
 
     profile_data = parse_json_object(profile_config, "profile-config-json")
     visual = profile_data.get("visual") if isinstance(profile_data.get("visual"), dict) else profile_data
-    return {
+    result = {
         internal_key: visual[public_key]
         for public_key, internal_key in FRIENDLY_VISUAL_KEYS.items()
         if public_key in visual and visual[public_key] is not None
     }
+    if isinstance(profile_data.get("measurement_core"), dict):
+        result["measurement_core"] = dict(profile_data["measurement_core"])
+    if isinstance(profile_data.get("preview"), dict):
+        result["preview"] = dict(profile_data["preview"])
+    return result
 
 
 def _profile_config_json_arg(value: str) -> dict[str, Any]:
@@ -123,24 +130,6 @@ def _profile_config_json_arg(value: str) -> dict[str, Any]:
         return parse_json_object(value, "--profile-config-json")
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
-
-
-def map_ref_to_esp_time(ref_time: float, delay_sec: float = 0.0, tempo: float = 1.0) -> float:
-    """Mapea tiempo maestro a tiempo del vídeo español original.
-
-    Un delay positivo significa que el audio español debe empezar más tarde en
-    la línea temporal maestra. La imagen equivalente del origen español está,
-    por tanto, antes: ``(t_ref - delay) * tempo``.
-    """
-
-    ref_value = _finite_float(ref_time, -1.0)
-    delay_value = _finite_float(delay_sec)
-    tempo_value = _finite_float(tempo, -1.0)
-    if ref_value < 0:
-        raise ValueError("ref_time debe ser positivo")
-    if tempo_value <= 0:
-        raise ValueError("tempo debe ser mayor que cero")
-    return (ref_value - delay_value) * tempo_value
 
 
 def profile_config(profile: str, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -201,20 +190,26 @@ def pick_zones(duration: float, profile: str = "pelicula", config: dict[str, Any
     cfg = profile_config(profile, config)
     duration_value = _finite_float(duration)
     burst = _finite_float(cfg.get("visual_burst_sec"), 2.0)
-    if duration_value <= 0 or burst <= 0 or duration_value < burst:
+    core = build_measurement_core(
+        duration_value,
+        profile,
+        cfg.get("measurement_core") if isinstance(cfg.get("measurement_core"), dict) else None,
+    )
+    if duration_value <= 0 or burst <= 0 or core["span_sec"] < burst:
         return []
 
     initial = list(cfg.get("visual_zone_pcts") or [])
     if str(profile).lower() == "trailer" and duration_value <= 45:
         initial = initial[:2]
     fallback = list(cfg.get("visual_zone_fallback_pcts") or [])
-    max_start = max(0.0, duration_value - burst - 0.05)
     zones: list[dict[str, float]] = []
     seen: set[int] = set()
     for origin, values in (("initial", initial), ("fallback", fallback)):
         for raw_pct in values:
             pct = max(0.0, min(100.0, _finite_float(raw_pct)))
-            start = min(max_start, max(0.0, duration_value * pct / 100.0))
+            start = core_zone_start(core, pct, burst)
+            if start is None:
+                continue
             bucket = int(round(start * 1000))
             if bucket in seen:
                 continue
@@ -326,6 +321,69 @@ class VisualVerifier:
             variable_frame_rate=bool(real_fps and abs(real_fps - avg_fps) > 0.01),
         )
 
+    def preview_plan(
+        self,
+        ref_video: str,
+        esp_video_original: str,
+        profile: str = "pelicula",
+        delay_hint_ms: int | float = 0,
+    ) -> dict[str, Any]:
+        """Planifica dos clips centrales equivalentes para el botón Editar."""
+
+        ref_meta = self.probe_video(ref_video)
+        esp_meta = self.probe_video(esp_video_original)
+        cfg = self.config(profile)
+        core_cfg = cfg.get("measurement_core") if isinstance(cfg.get("measurement_core"), dict) else None
+        preview_cfg = cfg.get("preview") if isinstance(cfg.get("preview"), dict) else {}
+        ref_core = build_measurement_core(ref_meta.duration, profile, core_cfg)
+        esp_core = build_measurement_core(esp_meta.duration, profile, core_cfg)
+        default_duration = 12.0 if str(profile).lower() == "trailer" else 30.0
+        requested_duration = max(2.0, _finite_float(preview_cfg.get("duration_sec"), default_duration))
+        preview_duration = min(requested_duration, ref_core["span_sec"], esp_core["span_sec"])
+        if preview_duration < 2.0:
+            raise RuntimeError("No hay core suficiente para crear el preview")
+        default_center = 40.0 if str(profile).lower() == "trailer" else 45.0
+        center_pct = max(0.0, min(100.0, _finite_float(preview_cfg.get("center_pct"), default_center)))
+        center_time = ref_core["start_sec"] + ref_core["span_sec"] * center_pct / 100.0
+        ref_start = min(
+            ref_core["end_sec"] - preview_duration,
+            max(ref_core["start_sec"], center_time - preview_duration / 2.0),
+        )
+
+        rates_differ = abs(round(ref_meta.avg_fps, 3) - round(esp_meta.avg_fps, 3)) > 0.0005
+        vfr = ref_meta.variable_frame_rate or esp_meta.variable_frame_rate
+        tempo = ref_meta.avg_fps / esp_meta.avg_fps if rates_differ and not vfr else 1.0
+        delay_hint = max(-120000, min(120000, int(round(_finite_float(delay_hint_ms)))))
+        esp_source_duration = preview_duration * tempo
+        mapped_esp_start = map_ref_to_esp_time(ref_start, delay_hint / 1000.0, tempo)
+        esp_start = min(
+            esp_core["end_sec"] - esp_source_duration,
+            max(esp_core["start_sec"], mapped_esp_start),
+        )
+        clamped = abs(esp_start - mapped_esp_start) > 0.05
+        window_sec = min(6.0, max(2.0, preview_duration / 3.0))
+        relative_max_ms = max(0, int(round((preview_duration - window_sec) * 1000.0)))
+        return {
+            "ok": True,
+            "profile": "trailer" if str(profile).lower() == "trailer" else "pelicula",
+            "core_start_sec": round(ref_core["start_sec"], 6),
+            "core_end_sec": round(ref_core["end_sec"], 6),
+            "core_span_sec": round(ref_core["span_sec"], 6),
+            "reference_clip_start_sec": round(ref_start, 6),
+            "spanish_clip_start_sec": round(esp_start, 6),
+            "spanish_source_duration_sec": round(esp_source_duration, 6),
+            "preview_duration_sec": round(preview_duration, 6),
+            "window_sec": round(window_sec, 6),
+            "relative_max_offset_ms": relative_max_ms,
+            "delay_hint_ms": delay_hint,
+            "tempo": round(tempo, 12),
+            "fps_correction_planned": bool(rates_differ and not vfr),
+            "variable_frame_rate": vfr,
+            "clip_reason": "core_center_tempo_hint_clamped" if clamped else "core_center_tempo_and_hint",
+            "measurement_core": ref_core,
+            "spanish_measurement_core": esp_core,
+        }
+
     def score_candidate(
         self,
         ref_video: str,
@@ -346,11 +404,23 @@ class VisualVerifier:
             esp_time = map_ref_to_esp_time(ref_time, delay_value, tempo_value)
             if ref_time < 0 or esp_time < 0:
                 raise ValueError("posición visual fuera de rango")
-            if ref_duration and ref_time + burst > float(ref_duration) + 0.05:
-                raise ValueError("ráfaga maestra fuera de rango")
             esp_source_burst = burst * tempo_value
-            if esp_duration and esp_time + esp_source_burst > float(esp_duration) + 0.05:
-                raise ValueError("ráfaga española fuera de rango")
+            if ref_duration:
+                ref_core = build_measurement_core(
+                    float(ref_duration),
+                    profile,
+                    cfg.get("measurement_core") if isinstance(cfg.get("measurement_core"), dict) else None,
+                )
+                if ref_time < ref_core["start_sec"] - 0.05 or ref_time + burst > ref_core["end_sec"] + 0.05:
+                    raise ValueError("ráfaga maestra fuera de rango del core")
+            if esp_duration:
+                esp_core = build_measurement_core(
+                    float(esp_duration),
+                    profile,
+                    cfg.get("measurement_core") if isinstance(cfg.get("measurement_core"), dict) else None,
+                )
+                if esp_time < esp_core["start_sec"] - 0.05 or esp_time + esp_source_burst > esp_core["end_sec"] + 0.05:
+                    raise ValueError("ráfaga española fuera de rango del core")
             scores, command_seconds = self._run_ssim(
                 ref_video,
                 esp_video_original,
@@ -492,6 +562,11 @@ class VisualVerifier:
         required_strong = int(cfg.get("visual_required_strong") or 1)
         max_zones = int(cfg.get("visual_max_zones") or required)
         zones = pick_zones(ref_meta.duration, profile, cfg)
+        measurement_core = build_measurement_core(
+            ref_meta.duration,
+            profile,
+            cfg.get("measurement_core") if isinstance(cfg.get("measurement_core"), dict) else None,
+        )
         zone_results: list[dict[str, Any]] = []
         valid_zones: list[dict[str, Any]] = []
         pending_replacements: list[dict[str, Any]] = []
@@ -499,6 +574,7 @@ class VisualVerifier:
             "profile": profile,
             "candidates": base_candidates,
             "tempo": tempo,
+            "measurement_core": measurement_core,
         })
 
         for zone in zones:
@@ -605,6 +681,7 @@ class VisualVerifier:
             "stage": stage,
             "profile": "trailer" if str(profile).lower() == "trailer" else "pelicula",
             "tempo": round(_finite_float(tempo, 1.0), 9),
+            "measurement_core": measurement_core,
             "candidate_delays_ms": base_candidates,
             "zones_attempted": len(zone_results),
             "zones_valid": len(valid_zones),
@@ -707,7 +784,9 @@ class VisualVerifier:
             tolerance = max(1.5, ref_meta.duration * 0.0015)
         duration_match = duration_delta <= tolerance
         vfr = ref_meta.variable_frame_rate or esp_meta.variable_frame_rate
-        provisional = bool(duration_match and not vfr)
+        # La duración total es una señal preliminar: intros y créditos distintos
+        # no invalidan por sí solos un cuerpo interior estable.
+        provisional = bool(not vfr)
         duration_payload = {
             "ref": round(ref_meta.duration, 6),
             "esp": round(esp_meta.duration, 6),
@@ -720,7 +799,7 @@ class VisualVerifier:
             if vfr:
                 reason = "vfr_no_confirmado"
             elif not duration_match:
-                reason = "duracion_no_confirma_tempo"
+                reason = "duration_ratio_warning"
             else:
                 reason = "duration_ratio_provisional"
             return {
@@ -741,6 +820,11 @@ class VisualVerifier:
 
         cfg = self.config(profile)
         zones = pick_zones(ref_meta.duration, profile, cfg)[:3]
+        measurement_core = build_measurement_core(
+            ref_meta.duration,
+            profile,
+            cfg.get("measurement_core") if isinstance(cfg.get("measurement_core"), dict) else None,
+        )
         comparisons = []
         absolute_wins = 0
         relative_wins = 0
@@ -801,14 +885,16 @@ class VisualVerifier:
         confirmed = bool(provisional and audio_stable and visual_match)
         if vfr:
             reason = "vfr_no_confirmado"
-        elif not duration_match:
-            reason = "duracion_no_confirma_tempo"
         elif not audio_stable:
             reason = "audio_corregido_no_confirma_tempo"
         elif not visual_match:
             reason = "imagen_no_confirma_tempo"
         else:
-            reason = "duration_audio_drift_and_visual_match"
+            reason = (
+                "duration_audio_drift_and_visual_match"
+                if duration_match
+                else "interior_timeline_audio_and_visual_match"
+            )
         return {
             "planned": True,
             "provisional": provisional,
@@ -834,6 +920,7 @@ class VisualVerifier:
                 "mean_delta": round(mean_delta, 6),
                 "contradictory_zones": contradictory_zones,
                 "match": visual_match,
+                "measurement_core": measurement_core,
                 "comparisons": comparisons,
             },
             "audio": dict(audio_evidence or {}),
@@ -912,7 +999,7 @@ def _json_print(payload: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verificación visual SSIM para Delay Audio")
-    parser.add_argument("action", choices=("score", "confirm-fps"))
+    parser.add_argument("action", choices=("score", "confirm-fps", "preview-plan"))
     parser.add_argument("--ref", required=True)
     parser.add_argument("--esp-video-original", required=True)
     parser.add_argument("--profile", choices=("pelicula", "trailer"), default="pelicula")
@@ -927,7 +1014,14 @@ def main() -> int:
     visual_overrides = visual_overrides_from_profile_config(args.profile_config_json)
     verifier = VisualVerifier(profile_overrides={args.profile: visual_overrides})
     try:
-        if args.action == "confirm-fps":
+        if args.action == "preview-plan":
+            payload = verifier.preview_plan(
+                args.ref,
+                args.esp_video_original,
+                args.profile,
+                args.delay_ms,
+            )
+        elif args.action == "confirm-fps":
             payload = verifier.confirm_fps_plan(
                 args.ref,
                 args.esp_video_original,

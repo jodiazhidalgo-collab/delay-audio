@@ -912,9 +912,25 @@ function workshopMetaAlerts(state) {
   const espFps = normalizeWorkshopFps(state?.esp?.fps);
   const refDuration = parseWorkshopDurationSeconds(state?.ref?.duration);
   const espDuration = parseWorkshopDurationSeconds(state?.esp?.duration);
+  const settings = workshopSettings(state);
+  const profile = settings.perfil === "trailer" ? "trailer" : "pelicula";
+  const profileKey = profile === "trailer" ? "trailer" : "movie";
+  const configuredHint = settings?.hybrid?.[profileKey]?.edit_hint || {};
+  const yellowMs = Number(configuredHint.yellow_ms || (profile === "trailer" ? 2000 : 5000));
+  const redMs = Number(configuredHint.red_ms || (profile === "trailer" ? 5000 : 15000));
+  const savedHint = workshopDelayHintMs(state);
+  const verifiedDelay = state?.result?.state === "OK_VERIFICADO" ? Number(state.result.delay_ms) : 0;
+  const estimatedOffset = savedHint || (Number.isFinite(verifiedDelay) ? Math.round(verifiedDelay) : 0);
+  const absoluteOffset = Math.abs(estimatedOffset);
+  const editHelp = absoluteOffset >= redMs
+    ? { level: "red", text: "Ayuda muy recomendable", offsetMs: estimatedOffset }
+    : absoluteOffset >= yellowMs
+      ? { level: "yellow", text: "Ayuda recomendada", offsetMs: estimatedOffset }
+      : { level: "", text: "", offsetMs: estimatedOffset };
   return {
     fpsMismatch: Boolean(refFps && espFps && refFps !== espFps),
-    durationWarning: refDuration !== null && espDuration !== null && Math.abs(refDuration - espDuration) >= 10
+    durationWarning: refDuration !== null && espDuration !== null && Math.abs(refDuration - espDuration) >= 10,
+    editHelp
   };
 }
 
@@ -933,7 +949,12 @@ function renderWorkshopMetaPill(value, type, alerts) {
 function renderWorkshopSlot(kind, slot, alerts = {}) {
   const selected = Boolean(slot?.path);
   const label = workshopSlotLabel(kind);
-  const editWarningClass = alerts?.durationWarning ? " is-duration-warning" : "";
+  const editHelp = alerts?.editHelp || {};
+  const editWarningClass = editHelp.level === "red"
+    ? " is-help-red"
+    : editHelp.level === "yellow"
+      ? " is-help-yellow"
+      : "";
   return `
     <section class="workshop-slot ${selected ? "has-video" : ""}">
       <div class="workshop-slot-head">
@@ -941,7 +962,7 @@ function renderWorkshopSlot(kind, slot, alerts = {}) {
           <div class="workshop-kicker">${escapeHtml(label)}</div>
           <h2>${selected ? escapeHtml(slot.name || "Video seleccionado") : "Sin seleccionar"}</h2>
         </div>
-        ${selected ? `<button class="workshop-mini workshop-edit${editWarningClass}" type="button" data-workshop-preview-open>Editar</button>` : ""}
+        ${selected ? `<button class="workshop-mini workshop-edit${editWarningClass}" type="button" data-workshop-preview-open><span>Editar</span>${editHelp.text ? `<small>${escapeHtml(editHelp.text)}</small>` : ""}</button>` : ""}
       </div>
       ${selected ? `
         <div class="workshop-meta">
@@ -1257,6 +1278,18 @@ function renderWorkshopHybridEvidence(state, result, hybridInfo) {
   const reason = workshopHybridReason(result, hybridInfo.message);
   const delayUnavailable = String(result?.state || "") !== "OK_VERIFICADO";
   const finalDelay = delayUnavailable ? "--" : cleanWorkshopDelay(result?.delay_ms);
+  const core = result?.measurement_core || {};
+  const coreText = Number(core.span_sec) > 0
+    ? `${Math.round(Number(core.start_sec || 0) / 60)}–${Math.round(Number(core.end_sec || 0) / 60)} min`
+    : "No disponible";
+  const editHint = result?.edit_hint || {};
+  const editText = editHint.hint_helped_fast_path === true
+    ? "Aceleró fast path"
+    : editHint.hint_rejected === true
+      ? "Descartada"
+      : editHint.hint_used === true
+        ? "Usada como semilla"
+        : "No usada";
 
   return `
     <div class="workshop-evidence">
@@ -1280,6 +1313,14 @@ function renderWorkshopHybridEvidence(state, result, hybridInfo) {
       <div class="workshop-evidence-item ${fpsInfo.className}">
         <span>FPS</span>
         <strong>${escapeHtml(fpsInfo.text)}</strong>
+      </div>
+      <div class="workshop-evidence-item ${Number(core.span_sec) > 0 ? "is-neutral" : "is-warn"}">
+        <span>Zona útil</span>
+        <strong>${escapeHtml(coreText)}</strong>
+      </div>
+      <div class="workshop-evidence-item ${editHint.hint_helped_fast_path === true ? "is-ok" : "is-neutral"}">
+        <span>Editar</span>
+        <strong>${escapeHtml(editText)}</strong>
       </div>
       <div class="workshop-evidence-item ${exportInfo.className}">
         <span>Exportación</span>
@@ -3512,11 +3553,14 @@ async function openWorkshopPreview() {
   workshopPreviewLoading = true;
   renderWorkshopOnly();
   try {
+    const settings = workshopSettings(state);
     const params = new URLSearchParams({
       v: "delay_audio_preview",
       da: "preview",
       ref: state.ref.path,
       esp: state.esp.path,
+      profile: settings.perfil === "trailer" ? "trailer" : "pelicula",
+      delay_hint_ms: String(workshopPreviewHintMs),
       t: String(Date.now())
     });
     const response = await fetch(`/api?${params.toString()}`, { cache: "no-store" });
@@ -3524,6 +3568,7 @@ async function openWorkshopPreview() {
     if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
     if (!workshopPreviewModalOpen) return;
     workshopPreviewData = data;
+    workshopPreviewHintMs = normalizeWorkshopDelayHintMs(data.delay_hint_ms || 0, Number(data.max_offset_ms || 60000));
     workshopPreviewError = "";
   } catch (error) {
     if (workshopPreviewModalOpen) {
@@ -3560,7 +3605,8 @@ function workshopPreviewWindowSec() {
 
 function workshopPreviewCurrentBase() {
   const videos = workshopPreviewVideos();
-  const hintSec = workshopPreviewHintMs / 1000;
+  const baseHintMs = Number(workshopPreviewData?.delay_hint_ms || 0);
+  const hintSec = (workshopPreviewHintMs - baseHintMs) / 1000;
   if (!videos.ref || !videos.esp) return 0;
   const base = hintSec >= 0 ? Number(videos.ref.currentTime || 0) - hintSec : Number(videos.ref.currentTime || 0);
   return Math.max(0, Math.min(workshopPreviewWindowSec(), base));
@@ -3568,7 +3614,8 @@ function workshopPreviewCurrentBase() {
 
 function workshopPreviewTargetTimes(baseSec) {
   const base = Math.max(0, Math.min(workshopPreviewWindowSec(), Number(baseSec) || 0));
-  const hintSec = workshopPreviewHintMs / 1000;
+  const baseHintMs = Number(workshopPreviewData?.delay_hint_ms || 0);
+  const hintSec = (workshopPreviewHintMs - baseHintMs) / 1000;
   if (hintSec >= 0) {
     return { ref: base + hintSec, esp: base };
   }
@@ -3643,7 +3690,10 @@ function adjustWorkshopPreviewHint(deltaMs) {
   if (!workshopPreviewData) return;
   const base = workshopPreviewCurrentBase();
   const max = Number(workshopPreviewData.max_offset_ms || 60000);
-  workshopPreviewHintMs = normalizeWorkshopDelayHintMs(workshopPreviewHintMs + Number(deltaMs || 0), max);
+  const relativeMax = Number(workshopPreviewData.relative_max_offset_ms || max);
+  const baseHint = Number(workshopPreviewData.delay_hint_ms || 0);
+  const candidate = normalizeWorkshopDelayHintMs(workshopPreviewHintMs + Number(deltaMs || 0), max);
+  workshopPreviewHintMs = Math.max(baseHint - relativeMax, Math.min(baseHint + relativeMax, candidate));
   setWorkshopPreviewBase(base);
   updateWorkshopPreviewUi();
 }
@@ -3661,8 +3711,9 @@ function updateWorkshopPreviewUi() {
   const playButton = foldersEl.querySelector("[data-workshop-preview-play]");
   if (playButton) playButton.textContent = workshopPreviewPlaying ? "Pausa" : "Play";
   const max = Number(workshopPreviewData?.max_offset_ms || 60000);
-  const visualMax = Math.max(1000, Math.min(max, workshopPreviewWindowSec() * 1000));
-  const pct = visualMax > 0 ? Math.max(-44, Math.min(44, (workshopPreviewHintMs / visualMax) * 44)) : 0;
+  const visualMax = Math.max(1000, Math.min(max, Number(workshopPreviewData?.relative_max_offset_ms || max)));
+  const relativeHint = workshopPreviewHintMs - Number(workshopPreviewData?.delay_hint_ms || 0);
+  const pct = visualMax > 0 ? Math.max(-44, Math.min(44, (relativeHint / visualMax) * 44)) : 0;
   const ruler = foldersEl.querySelector("[data-workshop-preview-ruler]");
   if (ruler) ruler.style.setProperty("--preview-shift", `${-pct}%`);
 }

@@ -15,10 +15,12 @@ Taller crea un vídeo final con la imagen y calidad de `Video Bueno` y el audio 
 ## Controles que se conservan
 
 - `Solo medir`: analiza y muestra el resultado, pero nunca exporta.
-- `Medir y exportar`: con el híbrido activo solo exporta si la puerta estricta lo autoriza; mientras el interruptor de rollback siga desactivado conserva la autorización legacy existente.
+- `Medir y exportar`: con el híbrido activo solo exporta si la puerta estricta lo autoriza. Una duda del híbrido nunca cae silenciosamente al motor legacy.
 - `Película` y `Tráiler`: seleccionan el perfil de análisis.
 - Selección de pistas, `Editar`, preview, `delayHintMs` y carpeta de salida mantienen su función actual.
-- `Editar` solo guarda una ayuda visual para orientar candidatos. No corrige FPS, no modifica originales y no sustituye la medición.
+- `Editar` abre clips interiores equivalentes, no clips desde `t=0`: 30 segundos alrededor del 45 % del core para Película y 12 segundos alrededor del 40 % para Tráiler. El mapeo aplica el tempo provisional y el hint existente sin salirse de los archivos.
+- `delayHintMs` es solo una semilla. Entra junto a `0`, puede centrar y acelerar el fast path, se abandona si no converge y nunca autoriza por sí solo. La medición final registra si ayudó, fue descartado y su error frente al resultado.
+- El botón solo muestra `Ayuda recomendada` o `Ayuda muy recomendable` cuando existe un hint o resultado fiable que supera los umbrales del perfil. La diferencia total de duración puede avisarse aparte, pero no colorea `Editar` por sí sola.
 
 La pestaña, entradas, pistas, ajustes, trabajo en curso y último resultado se conservan en `localStorage` y deben reaparecer tras recargar.
 Mientras un trabajo está activo, Taller bloquea cambios de entradas, pistas, modo, perfil, ayuda visual y salida para no perder su identificador ni abrir un segundo job distinto.
@@ -28,34 +30,45 @@ Mientras un trabajo está activo, Taller bloquea cambios de entradas, pistas, mo
 El motor separa siempre la evidencia visual de la evidencia de audio:
 
 1. La imagen compara `Video Bueno` con el vídeo español original.
-2. El audio compara las pistas seleccionadas. Con FPS distintos usa un `.mka` provisional después de que duración y VFR permitan el plan, pero ese temporal no confirma ni aplica todavía la corrección.
-3. El camino rápido necesita coincidencia visual fuerte y al menos dos zonas de audio coherentes.
-4. Si falta corroboración, el descubrimiento amplía zonas solo por una duda concreta registrada.
-5. Ningún score aislado, una sola zona o una confianza heredada autorizan exportación.
+2. Todas las posiciones visuales, estrechas, de descubrimiento, expansión, FPS y preview se eligen sobre un `measurement_core` común que excluye introducciones, logos, títulos y colas finales. Los porcentajes son siempre del core del vídeo de referencia.
+3. El audio compara las pistas seleccionadas. Con FPS distintos usa un `.mka` provisional después de descartar VFR no resuelto, pero crear ese temporal no confirma ni aplica todavía la corrección.
+4. El camino rápido necesita coincidencia visual fuerte y tres anclas interiores de audio coherentes y distribuidas.
+5. Si falta corroboración, el descubrimiento amplía zonas solo por una duda concreta registrada.
+6. Ningún score aislado, una sola zona o una confianza heredada autorizan exportación.
 
-El resultado híbrido contiene `state`, `delay_ms`, `visual`, `audio`, `fps_correction`, `decision`, `export_allowed` y, si se intentó exportar, `export`.
+El resultado híbrido contiene `state`, `delay_ms`, `measurement_core`, `timeline_model`, `edit_hint`, `visual`, `audio`, `fps_correction`, `decision`, `export_allowed` y, si se intentó exportar, `export`.
 
 ## Perfiles
 
 ### Película
 
-Usa ventanas de audio largas y posiciones separadas a lo largo de la obra. Prueba primero el candidato visual con un camino estrecho; si no queda corroborado, descubre y ordena candidatos de audio. Solo escala por falta de clúster repetido, empate o corroboración insuficiente, con un máximo de siete zonas visuales y ocho de audio.
+En obras de 90 minutos o más excluye 120 segundos al principio y al final. En películas más cortas usa `min(120, max(45, duración * 0.03))` y reduce el margen si hace falta para conservar un core razonable, con referencia mínima de 600 segundos. Usa ventanas de audio largas y posiciones separadas; solo escala por falta de clúster repetido, empate o corroboración insuficiente, con un máximo de siete zonas visuales y ocho de audio.
 
 ### Tráiler
 
-Usa ventanas cortas adaptadas a su duración y radios de búsqueda menores. Mantiene las mismas reglas de seguridad y coherencia que Película, con un máximo de cuatro zonas visuales y seis de audio.
+Excluye en cada extremo `min(4, max(1.5, duración * 0.08))`, conservando al menos 8 segundos de core cuando la duración lo permite. Usa ventanas y radios menores, tres anclas temporales iniciales y un máximo de cuatro zonas visuales y seis de audio.
+
+## Modelo temporal interior
+
+Cada coincidencia de audio produce una pareja interior `(ref_time, esp_time)`. Sin NumPy ni OpenCV se ajusta de forma robusta `ref_time = slope * esp_time + intercept`: mediana de pendientes entre pares, mediana de intercepts, rechazo de un outlier aislado y un reajuste con inliers.
+
+- `slope` y `drift_ms_per_sec` comprueban el tempo; el límite inicial es `abs(drift) <= 0.1 ms/s`.
+- `intercept_ms` representa el delay fijo y las diferencias constantes de introducción.
+- `residual_median_ms` y `residual_max_ms` detectan cortes, saltos o escenas añadidas dentro del cuerpo.
+- Se exigen al menos tres inliers distribuidos por el core. Un outlier aislado puede rechazarse; varios grupos o residuos incompatibles bloquean.
+- Una diferencia grande de duración total puede convivir con un modelo interior compatible. La duración es señal preliminar, nunca sustituto de las anclas.
 
 ## Corrección FPS
 
 - FPS nominales distintos crean un plan; no aplican una corrección por sí solos.
-- Duración incompatible o VFR rechazan el plan antes de crear el audio corregido.
-- Si la duración encaja y no hay VFR, el plan pasa a `provisional:true` y genera un `.mka` temporal para medir el audio; `confirmed` y `applied` siguen en `false`.
-- Película exige al menos tres zonas separadas en un mismo clúster, dispersión compatible y ausencia de deriva progresiva (`abs(slope) <= 0.1 ms/s`).
+- VFR no resuelto rechaza el plan antes de crear el audio corregido. La relación de duraciones total o recortada solo genera una señal o advertencia.
+- Sin VFR, el plan pasa a `provisional:true` y genera un `.mka` temporal para medir varias anclas interiores; `confirmed` y `applied` siguen en `false`.
+- Película y Tráiler exigen al menos tres anclas separadas, un clúster principal, modelo temporal compatible y ausencia de deriva progresiva.
 - El delay provisional obtenido por audio se usa para comparar visualmente el tempo planificado frente al nominal mediante `t_esp = (t_ref - delay) * tempo`.
 - La imagen usa siempre `Video Bueno` y el vídeo español original. El `.mka` se usa únicamente para audio.
-- La confirmación visual conserva el camino SSIM absoluto y permite un camino relativo para encodes distintos: mejora de al menos `0.05` en dos zonas, media mínima `0.08` y ninguna zona contradictoria. Ese camino nunca basta sin duración compatible, audio estable y ausencia de VFR.
-- Solo cuando duración, audio sin deriva e imagen convergen se marcan `confirmed:true` y `applied:true`; el motivo es `duration_audio_drift_and_visual_match`.
-- Si duración, audio, imagen o cadencia variable no confirman el plan, el estado es `FPS_NO_CONFIRMADOS` y la exportación queda bloqueada.
+- La confirmación visual conserva el camino SSIM absoluto y permite un camino relativo para encodes distintos: mejora de al menos `0.05` en dos zonas, media mínima `0.08` y ninguna zona contradictoria. Ese camino nunca basta sin modelo de audio estable y ausencia de VFR.
+- Solo cuando pendiente, intercept, residuos, audio e imagen interior convergen se marcan `confirmed:true` y `applied:true`. Si la duración total también encaja se conserva `duration_audio_drift_and_visual_match`; si los bordes difieren se usa `interior_timeline_audio_and_visual_match`.
+- Si audio, imagen, residuos, deriva o cadencia variable no confirman el plan, el estado es `FPS_NO_CONFIRMADOS` y la exportación queda bloqueada.
 - FPS iguales se muestran como corrección no necesaria.
 - FPS ausentes, no finitos o con un tempo inválido se consideran no confirmados y nunca autorizan un resultado.
 
@@ -69,7 +82,7 @@ Usa ventanas cortas adaptadas a su duración y radios de búsqueda menores. Mant
 - `AUDIO_VIDEO_ORIGEN_DUDOSO`: imagen y audio no confirman el mismo origen temporal.
 - `ERROR_TECNICO`: una dependencia o ejecución impidió completar el análisis.
 
-La web muestra de forma compacta delay final, estado, verificación y zonas visuales válidas, zonas de audio coherentes, estado FPS, motivo traducido y exportación realizada, en curso, no solicitada, bloqueada o fallida. Solo `OK_VERIFICADO` muestra un delay como final; los estados rechazados muestran `--`.
+La web muestra de forma compacta delay final, estado, zona útil, verificación y zonas visuales válidas, anclas de audio coherentes, estado FPS, si Editar ayudó, motivo traducido y exportación realizada, en curso, no solicitada, bloqueada o fallida. Solo `OK_VERIFICADO` muestra un delay como final; los estados rechazados muestran `--`.
 
 ## Autorización de exportación
 
@@ -78,7 +91,7 @@ La única autorización válida es:
 - `requested_mode == "exportar"`;
 - `state == "OK_VERIFICADO"`;
 - `export_allowed is True`;
-- contrato completo, sin contradicciones y con FPS seguro.
+- contrato completo, sin contradicciones, con FPS seguro, core válido y `timeline_model.compatible == true` con tres inliers.
 
 `MEDIA`, `ALTA`, `result.ok` o un resultado legacy no sustituyen esta puerta. `Solo medir` se congela al crear el job y no puede convertirse después en exportación por cambiar los ajustes.
 
@@ -98,17 +111,21 @@ La exportación conserva el vídeo bueno, prepara el audio español, sincroniza 
 La trazabilidad mínima incluye:
 
 - `fps_plan.started`, `fps_plan.provisional` o `fps_plan.rejected`;
+- `measurement_core.built` con márgenes, inicio, final y duración útil;
+- `timeline_anchor.matched` o `timeline_anchor.rejected` y `timeline_model.fitted` o `timeline_model.incompatible`;
 - `visual_gate.started`, zonas puntuadas o reemplazadas y `visual_gate.finished`;
 - `audio_narrow.started` y `audio_narrow.finished`;
 - `audio_discovery.started`, candidatos ordenados y `audio_discovery.finished`;
 - `fps_audio_evidence.finished` con soporte, dispersión y pendiente;
 - `fps_visual_confirmation.started`, comparación por zona y decisión final;
+- `edit_hint.used`, `edit_hint.helped` o `edit_hint.rejected` cuando existe ayuda;
 - `visual_final.started`, candidatos puntuados y `visual_final.finished`;
 - `decision.ok_verificado` o el estado de rechazo concreto;
 - `export_gate.allowed` o `export_gate.blocked`;
 - creación y limpieza de temporales.
+- `decision.final` con estado, delay, autorización y motivo.
 
-Cada evento guarda solo fase, duración, perfil, posición de zona, candidato, puntuación, margen, motivo y decisión que sean útiles para diagnosticar el job.
+Cada evento guarda solo fase, duración, perfil, posición de zona, candidato, puntuación, margen, modelo, motivo y decisión útiles. El resultado separa tiempos de metadatos, core, anclas, FPS, visual, narrow, discovery y exportación.
 
 ## Rollback
 

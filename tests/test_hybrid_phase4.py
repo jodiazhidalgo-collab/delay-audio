@@ -103,12 +103,12 @@ class HybridFastPathTests(unittest.TestCase):
         profile="pelicula",
         hint=0,
         winner=0,
-        audio_delays=(0, 0),
+        audio_delays=(0, 0, 0),
         scores=None,
         strong=True,
         fps_planned=False,
         fps_confirmed=False,
-        duration=120.0,
+        duration=1000.0,
     ):
         runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
         os.makedirs(runtime_root, exist_ok=True)
@@ -147,37 +147,37 @@ class HybridFastPathTests(unittest.TestCase):
         self.assertTrue(result["export_allowed"])
         self.assertEqual(result["confidence"], "ALTA")
         self.assertEqual(result["delay_ms"], expected_delay)
-        self.assertGreaterEqual(result["audio"]["supporting_zones"], 2)
+        self.assertGreaterEqual(result["audio"]["supporting_zones"], 3)
         self.assertTrue(result["visual"]["verified"])
         self.assertTrue(contrato_resultado_hibrido_valido(result))
 
-    def test_aligned_movie_finishes_after_two_audio_zones(self):
+    def test_aligned_movie_finishes_after_three_interior_anchors(self):
         motor, returncode, result = self.run_case()
         self.assertEqual(returncode, 0)
         self.assert_verified(result, 0)
-        self.assertEqual(len(motor.audio_calls), 2)
+        self.assertEqual(len(motor.audio_calls), 3)
         self.assertEqual(result["audio"]["segment_sec"], 25.0)
         self.assertEqual(result["audio"]["radius_ms"], 2000)
 
     def test_correct_hint_uses_wider_narrow_radius(self):
-        motor, _, result = self.run_case(hint=3000, winner=3000, audio_delays=(3000, 3000))
+        motor, _, result = self.run_case(hint=3000, winner=3000, audio_delays=(3000, 3000, 3000))
         self.assert_verified(result, 3000)
         self.assertEqual(result["audio"]["radius_ms"], 6000)
         self.assertEqual({call["search_center_ms"] for call in motor.audio_calls}, {3000})
 
     def test_wrong_hint_loses_to_zero_and_uses_normal_radius(self):
-        motor, _, result = self.run_case(hint=3000, winner=0, audio_delays=(0, 0))
+        motor, _, result = self.run_case(hint=3000, winner=0, audio_delays=(0, 0, 0))
         self.assert_verified(result, 0)
         self.assertEqual(result["audio"]["radius_ms"], 2000)
         self.assertEqual(result["visual"]["candidate_delays_ms"], [0, 3000])
         self.assertEqual({call["search_center_ms"] for call in motor.audio_calls}, {0})
 
     def test_positive_delay_keeps_sign(self):
-        _, _, result = self.run_case(hint=1000, winner=1000, audio_delays=(1000, 1000))
+        _, _, result = self.run_case(hint=1000, winner=1000, audio_delays=(1000, 1000, 1000))
         self.assert_verified(result, 1000)
 
     def test_negative_delay_keeps_sign(self):
-        _, _, result = self.run_case(hint=-1000, winner=-1000, audio_delays=(-1000, -1000))
+        _, _, result = self.run_case(hint=-1000, winner=-1000, audio_delays=(-1000, -1000, -1000))
         self.assert_verified(result, -1000)
 
     def test_aligned_trailer_uses_short_segments(self):
@@ -188,7 +188,13 @@ class HybridFastPathTests(unittest.TestCase):
         self.assertEqual(result["audio"]["radius_ms"], 1500)
 
     def test_trailer_with_known_delay(self):
-        _, _, result = self.run_case(profile="trailer", hint=1200, winner=1200, audio_delays=(1200, 1200), duration=60.0)
+        _, _, result = self.run_case(
+            profile="trailer",
+            hint=1200,
+            winner=1200,
+            audio_delays=(1200, 1200, 1200),
+            duration=60.0,
+        )
         self.assert_verified(result, 1200)
         self.assertEqual(result["audio"]["radius_ms"], 4000)
 
@@ -212,10 +218,10 @@ class HybridFastPathTests(unittest.TestCase):
         self.assertIn("fps_plan_not_confirmed", result["decision"]["contradictions"])
 
     def test_audio_that_agrees_with_itself_but_not_image_is_blocked_as_mismatch(self):
-        _, _, result = self.run_case(winner=0, audio_delays=(1000, 1000))
+        _, _, result = self.run_case(winner=0, audio_delays=(1000, 1000, 1000))
         self.assertEqual(result["state"], "AUDIO_VIDEO_ORIGEN_DUDOSO")
         self.assertFalse(result["export_allowed"])
-        self.assertEqual(result["audio"]["supporting_zones"], 2)
+        self.assertEqual(result["audio"]["supporting_zones"], 3)
         self.assertIn("audio_does_not_support_visual_winner", result["decision"]["contradictions"])
 
     def test_two_contradictory_audio_zones_block_export(self):
@@ -226,11 +232,11 @@ class HybridFastPathTests(unittest.TestCase):
         self.assertLess(result["audio"]["supporting_zones"], 2)
         self.assertIn("audio_does_not_support_visual_winner", result["decision"]["contradictions"])
 
-    def test_two_low_audio_scores_cannot_authorize(self):
-        _, _, result = self.run_case(scores=(0.35, 0.35))
+    def test_three_low_audio_scores_cannot_authorize(self):
+        _, _, result = self.run_case(scores=(0.35, 0.35, 0.35))
         self.assertNotEqual(result["state"], "OK_VERIFICADO")
         self.assertFalse(result["export_allowed"])
-        self.assertEqual(result["audio"]["supporting_zones"], 2)
+        self.assertEqual(result["audio"]["supporting_zones"], 3)
         self.assertIn("audio_does_not_support_visual_winner", result["decision"]["contradictions"])
 
     def test_short_trailer_does_not_count_overlapping_windows_twice(self):

@@ -144,10 +144,11 @@ class PassingVisualVerifier(VisualVerifier):
 class VisualTechnicalErrorTests(unittest.TestCase):
     def test_master_and_spanish_duration_boundaries_are_fail_closed(self):
         verifier = PassingVisualVerifier()
+        master_core = visual_module.build_measurement_core(99.95, "pelicula")
         master_exact = verifier.score_candidate(
             "ref.mkv",
             "esp.mkv",
-            98.0,
+            master_core["end_sec"] - 2.0,
             0,
             ref_duration=99.95,
             esp_duration=100.0,
@@ -155,9 +156,9 @@ class VisualTechnicalErrorTests(unittest.TestCase):
         master_outside = verifier.score_candidate(
             "ref.mkv",
             "esp.mkv",
-            98.0,
+            master_core["end_sec"] - 2.0,
             0,
-            ref_duration=99.949,
+            ref_duration=99.7,
             esp_duration=100.0,
         )
         spanish_exact = verifier.score_candidate(
@@ -202,7 +203,7 @@ class VisualTechnicalErrorTests(unittest.TestCase):
             verifier.score_candidate(
                 "ref.mkv",
                 "esp.mkv",
-                10.0,
+                50.0,
                 0,
                 ref_duration=100.0,
                 esp_duration=100.0,
@@ -263,11 +264,31 @@ class FpsConfirmationTests(unittest.TestCase):
         self.assertFalse(result["planned"])
         self.assertEqual(result["reason"], "fps_iguales")
 
-    def test_metadata_only_difference_is_rejected_by_duration(self):
+    def test_duration_difference_is_only_preliminary_and_audio_still_blocks(self):
         verifier = DeterministicFpsVerifier(fake_meta("ref", 100, 24), fake_meta("esp", 100, 25))
         result = verifier.confirm_fps_plan("ref", "esp", 24, 25, "pelicula")
         self.assertFalse(result["confirmed"])
-        self.assertEqual(result["reason"], "duracion_no_confirma_tempo")
+        self.assertTrue(result["provisional"])
+        self.assertFalse(result["duration"]["match"])
+        self.assertEqual(result["reason"], "audio_corregido_no_confirma_tempo")
+
+    def test_duration_difference_can_confirm_when_interior_evidence_converges(self):
+        verifier = DeterministicFpsVerifier(
+            fake_meta("ref", 100.0, 24.0),
+            fake_meta("esp", 100.0, 25.0),
+        )
+        result = verifier.confirm_fps_plan(
+            "ref",
+            "esp",
+            24.0,
+            25.0,
+            "pelicula",
+            800,
+            {"stable": True},
+        )
+        self.assertFalse(result["duration"]["match"])
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(result["reason"], "interior_timeline_audio_and_visual_match")
 
     def test_compatible_duration_is_still_rejected_without_absolute_or_relative_visual_support(self):
         ref_fps = 24000 / 1001
@@ -354,6 +375,35 @@ class FpsConfirmationTests(unittest.TestCase):
         self.assertTrue(metadata.variable_frame_rate)
 
 
+class PreviewPlanTests(unittest.TestCase):
+    def test_movie_preview_is_central_and_maps_tempo_and_hint(self):
+        verifier = DeterministicFpsVerifier(
+            fake_meta("ref", 7200.0, 24.0),
+            fake_meta("esp", 7500.0, 25.0),
+        )
+        plan = verifier.preview_plan("ref", "esp", "pelicula", 2000)
+        self.assertEqual(plan["profile"], "pelicula")
+        self.assertEqual(plan["preview_duration_sec"], 30.0)
+        self.assertGreater(plan["reference_clip_start_sec"], 3000.0)
+        self.assertNotEqual(plan["reference_clip_start_sec"], 0.0)
+        self.assertAlmostEqual(plan["tempo"], 0.96, places=9)
+        expected = (plan["reference_clip_start_sec"] - 2.0) * 0.96
+        self.assertAlmostEqual(plan["spanish_clip_start_sec"], expected, places=6)
+        self.assertEqual(plan["delay_hint_ms"], 2000)
+
+    def test_trailer_preview_uses_short_profile_and_core(self):
+        verifier = DeterministicFpsVerifier(
+            fake_meta("ref", 90.0, 24.0),
+            fake_meta("esp", 90.0, 24.0),
+        )
+        plan = verifier.preview_plan("ref", "esp", "trailer", 0)
+        self.assertEqual(plan["preview_duration_sec"], 12.0)
+        self.assertEqual(plan["core_start_sec"], 4.0)
+        self.assertEqual(plan["core_end_sec"], 86.0)
+        self.assertGreater(plan["reference_clip_start_sec"], 0.0)
+        self.assertLess(plan["window_sec"], plan["preview_duration_sec"])
+
+
 class ReplacementVisualVerifier(VisualVerifier):
     def __init__(self, event_callback=None):
         super().__init__(event_callback=event_callback)
@@ -362,7 +412,7 @@ class ReplacementVisualVerifier(VisualVerifier):
         return fake_meta(path, 100.0, 24.0)
 
     def score_candidate(self, ref_video, esp_video_original, ref_time, delay_ms, *args, **kwargs):
-        initial = any(abs(ref_time - value) < 0.001 for value in (18.0, 50.0, 82.0))
+        initial = any(abs(ref_time - value) < 0.001 for value in (30.8, 50.0, 69.2))
         score = 0.30 if initial else (0.95 if int(delay_ms) == 0 else 0.40)
         return {"ok": True, "mean_ssim": score, "frames": 4}
 

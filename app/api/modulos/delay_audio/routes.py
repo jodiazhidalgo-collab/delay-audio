@@ -47,14 +47,40 @@ AUDIO_NORMALIZE_THRESHOLD_MS = 500
 AUDIO_FINAL_MAX_FIRST_PACKET_MS = 1000
 AUDIO_DURATION_TOLERANCE_SEC = 1.0
 FPS_CORRECTION_THRESHOLD = 0.0005
-PREVIEW_WINDOW_SEC = 20
-PREVIEW_CLIP_SEC = 85
+PREVIEW_WINDOW_SEC = 6
+PREVIEW_CLIP_SEC = 30
 PREVIEW_MAX_OFFSET_MS = 60000
 PREVIEW_MAX_AGE_SEC = 6 * 3600
 DEFAULT_HYBRID_CONFIG = {
     "enabled": False,
     "visual_method": "ffmpeg_ssim_burst_v1",
     "movie": {
+        "measurement_core": {
+            "long_duration_sec": 5400.0,
+            "guard_start_sec": 120.0,
+            "guard_end_sec": 120.0,
+            "adaptive_guard_min_sec": 45.0,
+            "adaptive_guard_max_sec": 120.0,
+            "adaptive_guard_ratio": 0.03,
+            "min_span_sec": 600.0,
+        },
+        "timeline_model": {
+            "anchor_pcts": [30, 50, 70],
+            "min_anchors": 3,
+            "min_span_ratio": 0.25,
+            "residual_median_max_ms": 100,
+            "residual_max_ms": 180,
+            "max_drift_ms_per_sec": 0.1,
+            "max_rejected_anchors": 1,
+        },
+        "preview": {
+            "center_pct": 45,
+            "duration_sec": 30.0,
+        },
+        "edit_hint": {
+            "yellow_ms": 5000,
+            "red_ms": 15000,
+        },
         "visual": {
             "zone_pcts": [18, 50, 82],
             "fallback_zone_pcts": [10, 30, 70, 90, 40, 60],
@@ -96,6 +122,29 @@ DEFAULT_HYBRID_CONFIG = {
         },
     },
     "trailer": {
+        "measurement_core": {
+            "guard_min_sec": 1.5,
+            "guard_max_sec": 4.0,
+            "guard_ratio": 0.08,
+            "min_span_sec": 8.0,
+        },
+        "timeline_model": {
+            "anchor_pcts": [35, 52, 70],
+            "min_anchors": 3,
+            "min_span_ratio": 0.25,
+            "residual_median_max_ms": 80,
+            "residual_max_ms": 140,
+            "max_drift_ms_per_sec": 0.1,
+            "max_rejected_anchors": 1,
+        },
+        "preview": {
+            "center_pct": 40,
+            "duration_sec": 12.0,
+        },
+        "edit_hint": {
+            "yellow_ms": 2000,
+            "red_ms": 5000,
+        },
         "visual": {
             "zone_pcts": [22, 58, 82],
             "fallback_zone_pcts": [35, 75, 15, 88],
@@ -170,6 +219,9 @@ HYBRID_RESULT_FIELDS = frozenset({
     "delay_ms",
     "confidence",
     "fps_correction",
+    "measurement_core",
+    "timeline_model",
+    "edit_hint",
     "visual",
     "audio",
     "decision",
@@ -276,9 +328,71 @@ def _valid_audio_discovery_config(value, defaults):
     return _number_in_range(value.get("max_visual_candidates"), 1, 8, integer=True)
 
 
+def _valid_measurement_core(value, defaults, profile_key):
+    if not _exact_keys(value, defaults):
+        return False
+    if profile_key == "trailer":
+        return bool(
+            _number_in_range(value.get("guard_min_sec"), 0.1, 30)
+            and _number_in_range(value.get("guard_max_sec"), value["guard_min_sec"], 60)
+            and _number_in_range(value.get("guard_ratio"), 0.001, 0.25)
+            and _number_in_range(value.get("min_span_sec"), 2, 120)
+        )
+    return bool(
+        _number_in_range(value.get("long_duration_sec"), 1800, 14400)
+        and _number_in_range(value.get("guard_start_sec"), 0, 600)
+        and _number_in_range(value.get("guard_end_sec"), 0, 600)
+        and _number_in_range(value.get("adaptive_guard_min_sec"), 0, 300)
+        and _number_in_range(
+            value.get("adaptive_guard_max_sec"),
+            value["adaptive_guard_min_sec"],
+            600,
+        )
+        and _number_in_range(value.get("adaptive_guard_ratio"), 0.001, 0.25)
+        and _number_in_range(value.get("min_span_sec"), 60, 1800)
+    )
+
+
+def _valid_timeline_model(value, defaults):
+    return bool(
+        _exact_keys(value, defaults)
+        and _numeric_list(value.get("anchor_pcts"), 3, 8)
+        and _number_in_range(value.get("min_anchors"), 3, 8, integer=True)
+        and _number_in_range(value.get("min_span_ratio"), 0.1, 0.8)
+        and _number_in_range(value.get("residual_median_max_ms"), 20, 1000)
+        and _number_in_range(
+            value.get("residual_max_ms"),
+            value["residual_median_max_ms"],
+            2000,
+        )
+        and _number_in_range(value.get("max_drift_ms_per_sec"), 0.001, 1.0)
+        and _number_in_range(value.get("max_rejected_anchors"), 0, 3, integer=True)
+    )
+
+
+def _valid_preview_config(value, defaults, profile_key):
+    if not _exact_keys(value, defaults) or not _number_in_range(value.get("center_pct"), 10, 90):
+        return False
+    maximum = 30 if profile_key == "trailer" else 120
+    minimum = 4 if profile_key == "trailer" else 10
+    return _number_in_range(value.get("duration_sec"), minimum, maximum)
+
+
+def _valid_edit_hint_config(value, defaults):
+    return bool(
+        _exact_keys(value, defaults)
+        and _number_in_range(value.get("yellow_ms"), 100, 120000, integer=True)
+        and _number_in_range(value.get("red_ms"), value["yellow_ms"], 120000, integer=True)
+    )
+
+
 def _valid_hybrid_profile(value, defaults, profile_key):
     if not (
         _exact_keys(value, defaults)
+        and _valid_measurement_core(value.get("measurement_core"), defaults["measurement_core"], profile_key)
+        and _valid_timeline_model(value.get("timeline_model"), defaults["timeline_model"])
+        and _valid_preview_config(value.get("preview"), defaults["preview"], profile_key)
+        and _valid_edit_hint_config(value.get("edit_hint"), defaults["edit_hint"])
         and _valid_visual_config(value.get("visual"), defaults["visual"])
         and _valid_audio_narrow_config(value.get("audio_narrow"), defaults["audio_narrow"])
         and _valid_audio_discovery_config(value.get("audio_discovery"), defaults["audio_discovery"])
@@ -413,7 +527,15 @@ def fingerprint_config_hibrida(profile, enabled, visual_method, profile_config):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
-def _hybrid_ok_evidence(confidence, fps_correction, visual, audio, contradictions):
+def _hybrid_ok_evidence(
+    confidence,
+    fps_correction,
+    visual,
+    audio,
+    contradictions,
+    timeline_model=None,
+    measurement_core=None,
+):
     supporting_zones = audio.get("supporting_zones") if isinstance(audio, dict) else None
     fps_safe = isinstance(fps_correction, dict)
     for key in ("planned", "provisional", "confirmed", "applied"):
@@ -462,7 +584,14 @@ def _hybrid_ok_evidence(confidence, fps_correction, visual, audio, contradiction
         and visual.get("verified") is True
         and isinstance(supporting_zones, int)
         and not isinstance(supporting_zones, bool)
-        and supporting_zones >= 2
+        and supporting_zones >= 3
+        and isinstance(timeline_model, dict)
+        and timeline_model.get("compatible") is True
+        and isinstance(timeline_model.get("anchors_inliers"), int)
+        and timeline_model.get("anchors_inliers") >= 3
+        and isinstance(measurement_core, dict)
+        and _finite_number(measurement_core.get("span_sec"))
+        and float(measurement_core.get("span_sec")) > 0
         and isinstance(contradictions, list)
         and not contradictions
         and fps_safe
@@ -474,6 +603,9 @@ def construir_resultado_hibrido(
     delay_ms=0,
     confidence="BAJA",
     fps_correction=None,
+    measurement_core=None,
+    timeline_model=None,
+    edit_hint=None,
     visual=None,
     audio=None,
     reason="",
@@ -483,6 +615,9 @@ def construir_resultado_hibrido(
     fps_correction = dict(fps_correction or {})
     visual = dict(visual or {})
     audio = dict(audio or {})
+    measurement_core = dict(measurement_core or {})
+    timeline_model = dict(timeline_model or {})
+    edit_hint = dict(edit_hint or {})
     contradictions = list(contradictions or [])
     if state not in HYBRID_FINAL_STATES:
         state = "ERROR_TECNICO"
@@ -494,6 +629,8 @@ def construir_resultado_hibrido(
         visual,
         audio,
         contradictions,
+        timeline_model,
+        measurement_core,
     ):
         state = "NO_FIABLE"
         reason = reason or "evidencia_insuficiente_para_autorizar"
@@ -506,6 +643,9 @@ def construir_resultado_hibrido(
         "delay_ms": float(delay_ms) if _finite_number(delay_ms) else 0,
         "confidence": confidence if isinstance(confidence, str) else "BAJA",
         "fps_correction": fps_correction,
+        "measurement_core": measurement_core,
+        "timeline_model": timeline_model,
+        "edit_hint": edit_hint,
         "visual": visual,
         "audio": audio,
         "decision": {
@@ -527,7 +667,18 @@ def contrato_resultado_hibrido_valido(result):
         return False
     if not _finite_number(result.get("delay_ms")) or not isinstance(result.get("confidence"), str):
         return False
-    if not all(isinstance(result.get(key), dict) for key in ("fps_correction", "visual", "audio", "decision")):
+    if not all(
+        isinstance(result.get(key), dict)
+        for key in (
+            "fps_correction",
+            "measurement_core",
+            "timeline_model",
+            "edit_hint",
+            "visual",
+            "audio",
+            "decision",
+        )
+    ):
         return False
     decision = result["decision"]
     if not isinstance(decision.get("reason"), str) or not isinstance(decision.get("contradictions"), list):
@@ -542,6 +693,8 @@ def contrato_resultado_hibrido_valido(result):
             result.get("visual"),
             result.get("audio"),
             decision.get("contradictions"),
+            result.get("timeline_model"),
+            result.get("measurement_core"),
         )
     )
 
@@ -980,6 +1133,8 @@ def delay_audio_api(q):
 def preview_visual(q):
     ref = normalizar_ruta(q.get("ref", [""])[0])
     esp = normalizar_ruta(q.get("esp", [""])[0])
+    profile = limpiar_opcion(q.get("profile", ["pelicula"])[0], {"pelicula", "trailer"}, "pelicula")
+    delay_hint_ms = normalizar_delay_hint_ms(q.get("delay_hint_ms", ["0"])[0])
     error = validar_video(ref) or validar_video(esp)
     if error:
         return {"ok": False, "error": error}
@@ -990,17 +1145,35 @@ def preview_visual(q):
     os.makedirs(preview_dir, exist_ok=True)
 
     try:
+        cfg = leer_config()
+        profile_config = config_hibrida_perfil(cfg, profile)
+        plan = generar_plan_preview(ref, esp, profile, delay_hint_ms, profile_config)
         ref_out = os.path.join(preview_dir, "ref.mp4")
         esp_out = os.path.join(preview_dir, "esp.mp4")
-        generar_preview_clip(ref, ref_out, "Video Bueno")
-        generar_preview_clip(esp, esp_out, "Audio Espanol")
+        generar_preview_clip(
+            ref,
+            ref_out,
+            "Video Bueno",
+            plan["reference_clip_start_sec"],
+            plan["preview_duration_sec"],
+            1.0,
+        )
+        generar_preview_clip(
+            esp,
+            esp_out,
+            "Audio Espanol",
+            plan["spanish_clip_start_sec"],
+            plan["preview_duration_sec"],
+            plan["tempo"],
+        )
         manifest = {
             "id": preview_id,
             "created": datetime.now().isoformat(timespec="seconds"),
             "ref": ref,
             "esp": esp,
-            "window_sec": PREVIEW_WINDOW_SEC,
-            "clip_sec": PREVIEW_CLIP_SEC,
+            **plan,
+            "window_sec": plan["window_sec"],
+            "clip_sec": plan["preview_duration_sec"],
             "max_offset_ms": PREVIEW_MAX_OFFSET_MS,
         }
         with open(os.path.join(preview_dir, "preview.json"), "w", encoding="utf-8") as f:
@@ -1010,8 +1183,9 @@ def preview_visual(q):
             "id": preview_id,
             "ref_url": f"/preview/{preview_id}/ref.mp4",
             "esp_url": f"/preview/{preview_id}/esp.mp4",
-            "window_sec": PREVIEW_WINDOW_SEC,
-            "clip_sec": PREVIEW_CLIP_SEC,
+            **plan,
+            "window_sec": plan["window_sec"],
+            "clip_sec": plan["preview_duration_sec"],
             "max_offset_ms": PREVIEW_MAX_OFFSET_MS,
         }
     except Exception as exc:
@@ -1019,7 +1193,46 @@ def preview_visual(q):
         return {"ok": False, "error": str(exc)}
 
 
-def generar_preview_clip(source, target, label):
+def generar_plan_preview(ref, esp, profile, delay_hint_ms, profile_config):
+    cmd = [
+        "python",
+        MOTOR_VISUAL,
+        "preview-plan",
+        "--ref",
+        ref,
+        "--esp-video-original",
+        esp,
+        "--profile",
+        profile,
+        "--delay-ms",
+        str(delay_hint_ms),
+        "--profile-config-json",
+        json.dumps(profile_config, ensure_ascii=False, separators=(",", ":")),
+    ]
+    p = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        timeout=300,
+    )
+    if p.returncode != 0:
+        raise RuntimeError((p.stderr or p.stdout or "No pude planificar el preview").strip()[-800:])
+    try:
+        data = json.loads(p.stdout or "{}")
+    except Exception as exc:
+        raise RuntimeError("El plan de preview no devolvió JSON válido") from exc
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        raise RuntimeError(str((data or {}).get("error") or "Plan de preview inválido"))
+    return data
+
+
+def generar_preview_clip(source, target, label, start_sec=0.0, duration_sec=PREVIEW_CLIP_SEC, tempo=1.0):
+    start_sec = max(0.0, float(start_sec or 0.0))
+    duration_sec = max(2.0, float(duration_sec or PREVIEW_CLIP_SEC))
+    tempo = max(0.5, min(2.0, float(tempo or 1.0)))
+    source_duration = duration_sec * tempo
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -1028,22 +1241,28 @@ def generar_preview_clip(source, target, label):
         "-loglevel",
         "error",
         "-ss",
-        "0",
+        f"{start_sec:.6f}",
         "-t",
-        str(PREVIEW_CLIP_SEC),
+        f"{source_duration:.6f}",
         "-i",
         source,
         "-map",
         "0:v:0",
         "-an",
         "-vf",
-        "scale=640:-2,fps=24,format=yuv420p",
+        (
+            f"trim=duration={source_duration:.6f},"
+            f"setpts=(PTS-STARTPTS)/{tempo:.12f},"
+            "scale=640:-2,fps=24,format=yuv420p"
+        ),
         "-c:v",
         "libx264",
         "-preset",
         "veryfast",
         "-crf",
         "31",
+        "-t",
+        f"{duration_sec:.6f}",
         "-movflags",
         "+faststart",
         target,
@@ -1412,11 +1631,10 @@ def confirmar_plan_fps(job, fps_plan, profile):
         "--provisional-only",
     ]
     profile_config = job.get("hybrid_profile_config")
-    visual_config = profile_config.get("visual") if isinstance(profile_config, dict) else None
-    if isinstance(visual_config, dict):
+    if isinstance(profile_config, dict):
         cmd += [
             "--profile-config-json",
-            json.dumps(visual_config, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(profile_config, ensure_ascii=False, separators=(",", ":")),
         ]
     started_at = time.time()
     try:

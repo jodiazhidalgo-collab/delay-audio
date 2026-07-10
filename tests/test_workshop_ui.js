@@ -210,7 +210,85 @@ async function main() {
   assert.equal(requests.filter((url) => url.includes("delay_audio_start")).length, 1);
   assert.equal(requests.some((url) => url.includes("job=job-terminado")), false);
 
-  console.log("workshop_ui: 5 casos OK");
+  const baseSlot = { path: "ref.mkv", name: "Ref", audio: 0, duration: "01:40:00", fps: "24.000" };
+  harness.setState({
+    ref: baseSlot,
+    esp: { ...baseSlot, path: "esp.mkv", duration: "01:42:00" },
+    delayHintMs: 0,
+    settings: { modo: "medir", perfil: "pelicula" }
+  });
+  const durationOnlyHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
+  assert.doesNotMatch(durationOnlyHtml, /Ayuda recomendada/);
+  assert.doesNotMatch(durationOnlyHtml, /is-help-yellow/);
+
+  harness.setState({
+    ref: baseSlot,
+    esp: { ...baseSlot, path: "esp.mkv" },
+    delayHintMs: 6000,
+    settings: { modo: "medir", perfil: "pelicula" }
+  });
+  const yellowEditHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
+  assert.match(yellowEditHtml, /Ayuda recomendada/);
+  assert.match(yellowEditHtml, /is-help-yellow/);
+
+  harness.setState({
+    ref: baseSlot,
+    esp: { ...baseSlot, path: "esp.mkv" },
+    delayHintMs: 16000,
+    settings: { modo: "medir", perfil: "pelicula" }
+  });
+  const redEditHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
+  assert.match(redEditHtml, /Ayuda muy recomendable/);
+  assert.match(redEditHtml, /is-help-red/);
+
+  const hybridEvidenceHtml = harness.evaluate(`renderWorkshopHybridEvidence(
+    { requested_mode: "medir" },
+    {
+      state: "OK_VERIFICADO",
+      delay_ms: 800,
+      export_allowed: true,
+      visual: { verified: true, zones_valid: 3 },
+      audio: { supporting_zones: 3 },
+      fps_correction: { planned: true, confirmed: true, applied: true },
+      measurement_core: { start_sec: 120, end_sec: 5280, span_sec: 5160 },
+      edit_hint: { hint_used: true, hint_helped_fast_path: true },
+      decision: { reason: "ok", contradictions: [] }
+    },
+    hybridWorkshopResultInfo({ state: "OK_VERIFICADO" })
+  )`);
+  assert.match(hybridEvidenceHtml, /Zona útil/);
+  assert.match(hybridEvidenceHtml, /Aceleró fast path/);
+
+  let previewRequest = "";
+  harness.setState({
+    ref: { ...baseSlot, path: "ref.mkv" },
+    esp: { ...baseSlot, path: "esp.mkv" },
+    delayHintMs: 2000,
+    settings: { modo: "medir", perfil: "trailer" }
+  });
+  harness.context.fetch = async (url) => {
+    previewRequest = String(url);
+    return response({
+      ok: true,
+      ref_url: "/preview/x/ref.mp4",
+      esp_url: "/preview/x/esp.mp4",
+      profile: "trailer",
+      delay_hint_ms: 2000,
+      window_sec: 4,
+      relative_max_offset_ms: 8000,
+      max_offset_ms: 60000
+    });
+  };
+  await harness.evaluate("openWorkshopPreview()");
+  assert.match(previewRequest, /profile=trailer/);
+  assert.match(previewRequest, /delay_hint_ms=2000/);
+  const mappedPreviewTimes = JSON.parse(harness.evaluate(`JSON.stringify((() => {
+    workshopPreviewHintMs = 5000;
+    return workshopPreviewTargetTimes(0);
+  })())`));
+  assert.deepEqual(mappedPreviewTimes, { ref: 3, esp: 0 });
+
+  console.log("workshop_ui: 10 casos OK");
 }
 
 main().catch((error) => {

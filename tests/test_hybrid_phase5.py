@@ -174,9 +174,40 @@ class AtomicDiagnosticWriteTests(unittest.TestCase):
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
 
+    def test_progress_writer_reuses_atomic_smb_retry(self):
+        runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
+        os.makedirs(runtime_root, exist_ok=True)
+        job_dir = os.path.join(runtime_root, f"phase5-progress-{uuid.uuid4().hex}")
+        motor = DelayAudio("ref.mkv", "esp.mkv", job_dir)
+        real_replace = os.replace
+        calls = []
+
+        def flaky_replace(source, destination):
+            calls.append((source, destination))
+            if len(calls) < 3:
+                raise PermissionError("bloqueo SMB transitorio")
+            return real_replace(source, destination)
+
+        try:
+            with mock.patch.object(diagnostico_job.os, "replace", side_effect=flaky_replace), mock.patch.object(
+                diagnostico_job.time, "sleep"
+            ) as sleep:
+                motor.write_progress("audio_narrow", 50, "Audio", total=4, done=2)
+
+            with open(motor.progress_path, encoding="utf-8") as handle:
+                self.assertEqual(
+                    json.load(handle),
+                    {"phase": "audio_narrow", "percent": 50, "label": "Audio", "total": 4, "done": 2},
+                )
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(sleep.call_count, 2)
+            self.assertFalse([name for name in os.listdir(job_dir) if name.endswith(".tmp")])
+        finally:
+            shutil.rmtree(job_dir, ignore_errors=True)
+
 
 class HybridDiscoveryTests(unittest.TestCase):
-    def run_case(self, duration=300.0, **kwargs):
+    def run_case(self, duration=1000.0, **kwargs):
         runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
         os.makedirs(runtime_root, exist_ok=True)
         job_dir = os.path.join(runtime_root, f"phase5-unit-{uuid.uuid4().hex}")
@@ -220,7 +251,7 @@ class HybridDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["visual"]["winner_delay_ms"], 0)
         self.assertIn("audio_does_not_support_visual_winner", result["decision"]["contradictions"])
 
-    def test_ambiguous_audio_expands_only_for_recorded_doubt(self):
+    def test_multiple_outliers_expand_and_remain_safely_blocked(self):
         motor, _, result = self.run_case(
             final_visual_winner=1000,
             discovery_delays=(1000, 5000, -4000, 12000, 1000, 1000),
@@ -229,7 +260,8 @@ class HybridDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["audio"]["expansion_reason"], "corroboracion_insuficiente")
         self.assertLessEqual(result["audio"]["zones_attempted"], 8)
         self.assertGreater(result["audio"]["zones_attempted"], 4)
-        self.assertEqual(result["state"], "OK_VERIFICADO")
+        self.assertEqual(result["state"], "MONTAJE_DISTINTO")
+        self.assertFalse(result["export_allowed"])
         self.assertEqual(result["audio"]["required_supporting_zones"], 3)
         self.assertEqual(result["audio"]["zones_attempted"], 6)
         self.assertEqual(motor.discovery_audio_calls, result["audio"]["zones_attempted"])
@@ -290,13 +322,14 @@ class HybridDiscoveryTests(unittest.TestCase):
         self.assertNotEqual(result["state"], "MONTAJE_DISTINTO")
         self.assertFalse(result["export_allowed"])
 
-    def test_expansion_stops_as_soon_as_the_recorded_doubt_is_resolved(self):
+    def test_expansion_stops_but_does_not_hide_three_conflicting_anchors(self):
         motor, _, result = self.run_case(
             final_visual_winner=1000,
             discovery_delays=(1000, 5000, -4000, 12000, 1000, 1000, 1000, 1000),
         )
         self.assertTrue(result["audio"]["expanded"])
-        self.assertEqual(result["state"], "OK_VERIFICADO")
+        self.assertEqual(result["state"], "MONTAJE_DISTINTO")
+        self.assertFalse(result["export_allowed"])
         self.assertEqual(result["audio"]["required_supporting_zones"], 3)
         self.assertEqual(result["audio"]["zones_attempted"], 6)
         self.assertEqual(motor.discovery_audio_calls, 6)

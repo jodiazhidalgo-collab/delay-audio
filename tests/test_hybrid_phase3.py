@@ -29,8 +29,16 @@ def verified_result(**overrides):
             "ref_fps": 23.976,
             "esp_fps": 23.976,
         },
+        "measurement_core": {"start_sec": 120.0, "end_sec": 5880.0, "span_sec": 5760.0},
+        "timeline_model": {
+            "compatible": True,
+            "anchors_total": 3,
+            "anchors_inliers": 3,
+            "anchors_rejected": 0,
+        },
+        "edit_hint": {"hint_used": False, "hint_is_measurement": False},
         "visual": {"verified": True},
-        "audio": {"supporting_zones": 2},
+        "audio": {"supporting_zones": 3},
         "reason": "audio_and_visual_agree",
         "contradictions": [],
     }
@@ -87,6 +95,26 @@ class HybridResultContractTests(unittest.TestCase):
         result = verified_result(audio={"supporting_zones": 1})
         self.assertEqual(result["state"], "NO_FIABLE")
         self.assertIs(result["export_allowed"], False)
+
+    def test_hint_alone_never_authorizes_export(self):
+        result = routes.construir_resultado_hibrido(
+            "OK_VERIFICADO",
+            confidence="ALTA",
+            fps_correction={
+                "planned": False,
+                "provisional": False,
+                "confirmed": False,
+                "applied": False,
+                "reason": "fps_iguales",
+                "ref_fps": 24.0,
+                "esp_fps": 24.0,
+            },
+            visual={"verified": False},
+            audio={"supporting_zones": 0},
+            edit_hint={"hint_used": True, "hint_is_measurement": False},
+        )
+        self.assertEqual(result["state"], "NO_FIABLE")
+        self.assertFalse(routes.exportacion_hibrida_autorizada(result))
 
     def test_unconfirmed_planned_fps_cannot_become_verified(self):
         result = verified_result(fps_correction={"planned": True, "provisional": True, "confirmed": False, "applied": False})

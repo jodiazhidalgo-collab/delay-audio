@@ -2383,13 +2383,30 @@ button.watch-chevron {
   border-color: rgba(116, 199, 255, .34);
   background: rgba(16, 43, 66, .88);
   color: #dff4ff;
+  display: grid;
+  gap: 1px;
+  line-height: 1.05;
 }
 
-.workshop-edit.is-duration-warning {
+.workshop-edit small {
+  color: inherit;
+  font-size: 8px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.workshop-edit.is-help-yellow {
   border-color: rgba(255, 200, 79, .46);
   background: rgba(232, 171, 45, .28);
   color: #ffe8a6;
   box-shadow: inset 0 0 0 1px rgba(255, 200, 79, .34);
+}
+
+.workshop-edit.is-help-red {
+  border-color: rgba(255, 123, 123, .52);
+  background: rgba(137, 39, 49, .48);
+  color: #ffe0e0;
+  box-shadow: inset 0 0 0 1px rgba(255, 123, 123, .34);
 }
 
 .workshop-preview-modal {
