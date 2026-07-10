@@ -4,5 +4,8 @@
   "confianza_minima": "MEDIA",
   "carpeta_salida": "/data/downloads/torrents/complete/movies",
   "sub_video_bueno": "INGLES",
-  "sub_fuente_espanol": "ESPANOL delay audio"
+  "sub_fuente_espanol": "ESPANOL delay audio",
+  "hybrid": {
+    "enabled": false
+  }
 }

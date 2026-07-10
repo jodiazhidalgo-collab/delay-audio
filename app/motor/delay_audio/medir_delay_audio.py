@@ -28,14 +28,37 @@ AUDIO_EXTENSIONS = {".mka", ".m4a", ".aac", ".ac3", ".eac3", ".dts", ".flac", ".
 
 
 class DelayAudio:
-    def __init__(self, ref_file, esp_file, job_dir, ref_audio_index=None, esp_audio_index=None, profile="pelicula", delay_hint_ms=0):
+    def __init__(
+        self,
+        ref_file,
+        esp_file,
+        job_dir,
+        ref_audio_index=None,
+        esp_audio_index=None,
+        profile="pelicula",
+        delay_hint_ms=0,
+        esp_video_original=None,
+        fps_ref=0.0,
+        fps_esp=0.0,
+        fps_tempo=1.0,
+        fps_plan_enabled=False,
+        fps_plan_confirmed=False,
+        hybrid_enabled=False,
+    ):
         self.ref_file = os.path.abspath(ref_file)
         self.esp_file = os.path.abspath(esp_file)
+        self.esp_video_original = os.path.abspath(esp_video_original or esp_file)
         self.job_dir = os.path.abspath(job_dir)
         self.ref_audio_index = ref_audio_index
         self.esp_audio_index = esp_audio_index
         self.profile = profile if profile in ("pelicula", "trailer") else "pelicula"
         self.delay_hint_ms = max(-120000, min(120000, int(delay_hint_ms or 0)))
+        self.fps_ref = float(fps_ref or 0.0)
+        self.fps_esp = float(fps_esp or 0.0)
+        self.fps_tempo = float(fps_tempo or 1.0)
+        self.fps_plan_enabled = bool(fps_plan_enabled)
+        self.fps_plan_confirmed = bool(fps_plan_confirmed)
+        self.hybrid_enabled = bool(hybrid_enabled)
         self.segment_sec = SEGMENT_SEC
         self.max_delay_sec = MAX_DELAY_SEC
         self.max_zones = MAX_ZONES
@@ -426,7 +449,9 @@ class DelayAudio:
         self.reset_logs()
         self.diag.init(inputs={
             "video_bueno": self.ref_file,
-            "video_espanol": self.esp_file,
+            "video_espanol": self.esp_video_original,
+            "video_espanol_original": self.esp_video_original,
+            "audio_espanol_medicion": self.esp_file,
             "ref_audio": self.ref_audio_index,
             "esp_audio": self.esp_audio_index,
         }, settings={
@@ -435,6 +460,14 @@ class DelayAudio:
             "max_delay_sec": self.max_delay_sec,
             "max_zones": self.max_zones,
             "delay_hint_ms": self.delay_hint_ms,
+            "hybrid_enabled": self.hybrid_enabled,
+            "fps_plan": {
+                "planned": self.fps_plan_enabled,
+                "confirmed": self.fps_plan_confirmed,
+                "ref_fps": self.fps_ref,
+                "esp_fps": self.fps_esp,
+                "tempo": self.fps_tempo,
+            },
         })
         self.write_progress("starting", 0, "Arrancando")
         try:
@@ -442,6 +475,9 @@ class DelayAudio:
             self.log("ARGUMENTOS RECIBIDOS: 2")
             self.log(f"VIDEO BUENO: {self.ref_file}")
             self.log(f"VIDEO ESPANOL: {self.esp_file}")
+            if self.esp_video_original != self.esp_file:
+                self.log(f"VIDEO ESPANOL ORIGINAL: {self.esp_video_original}")
+                self.log(f"AUDIO ESPANOL MEDICION: {self.esp_file}")
             validate_video(self.ref_file)
             validate_video(self.esp_file, allow_audio=True)
             self.diag.event("validate_inputs", "finished", "Entradas validas")
@@ -673,6 +709,13 @@ def main():
     parser.add_argument("--esp-audio-index", type=int, help="Pista de audio del video espanol")
     parser.add_argument("--profile", choices=("pelicula", "trailer"), default="pelicula", help="Perfil de medicion")
     parser.add_argument("--delay-hint-ms", type=int, default=0, help="Ayuda visual opcional para centrar la busqueda")
+    parser.add_argument("--esp-video-original", default="", help="Video español original para validación visual")
+    parser.add_argument("--fps-ref", type=float, default=0.0)
+    parser.add_argument("--fps-esp", type=float, default=0.0)
+    parser.add_argument("--fps-tempo", type=float, default=1.0)
+    parser.add_argument("--fps-plan-enabled", action="store_true")
+    parser.add_argument("--fps-plan-confirmed", action="store_true")
+    parser.add_argument("--hybrid-enabled", action="store_true")
     args = parser.parse_args()
     return DelayAudio(
         args.ref,
@@ -682,6 +725,13 @@ def main():
         args.esp_audio_index,
         args.profile,
         args.delay_hint_ms,
+        args.esp_video_original or args.esp,
+        args.fps_ref,
+        args.fps_esp,
+        args.fps_tempo,
+        args.fps_plan_enabled,
+        args.fps_plan_confirmed,
+        args.hybrid_enabled,
     ).run()
 
 

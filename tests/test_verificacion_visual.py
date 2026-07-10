@@ -7,7 +7,7 @@ MOTOR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app"
 if MOTOR_ROOT not in sys.path:
     sys.path.insert(0, MOTOR_ROOT)
 
-from verificacion_visual import VisualVerifier, map_ref_to_esp_time, pick_zones  # noqa: E402
+from verificacion_visual import VideoMetadata, VisualVerifier, map_ref_to_esp_time, pick_zones  # noqa: E402
 
 
 class VisualMappingTests(unittest.TestCase):
@@ -23,6 +23,17 @@ class VisualMappingTests(unittest.TestCase):
     def test_map_24_to_23976(self):
         tempo = (24000 / 1001) / 24.0
         self.assertAlmostEqual(map_ref_to_esp_time(1000.0, 15.0, tempo), 984.015984, places=6)
+
+    def test_map_24_to_23976_keeps_sign_at_start_middle_and_end(self):
+        tempo = (24000 / 1001) / 24.0
+        for ref_time in (18.0, 60.0, 102.0):
+            with self.subTest(ref_time=ref_time):
+                positive = map_ref_to_esp_time(ref_time, 1.5, tempo)
+                negative = map_ref_to_esp_time(ref_time, -1.5, tempo)
+                self.assertAlmostEqual(positive, (ref_time - 1.5) * tempo, places=9)
+                self.assertAlmostEqual(negative, (ref_time + 1.5) * tempo, places=9)
+                self.assertLess(positive, ref_time * tempo)
+                self.assertGreater(negative, ref_time * tempo)
 
     def test_map_rejects_invalid_tempo(self):
         with self.assertRaises(ValueError):
@@ -88,6 +99,70 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(ranked[0]["delay_ms"], 0)
         self.assertEqual(ranked[0]["wins"], 2)
         self.assertEqual(ranked[1]["wins"], 0)
+
+
+class DeterministicFpsVerifier(VisualVerifier):
+    def __init__(self, ref_meta, esp_meta, planned_score=0.95, nominal_score=0.40):
+        super().__init__()
+        self._metas = [ref_meta, esp_meta]
+        self._planned_score = planned_score
+        self._nominal_score = nominal_score
+
+    def probe_video(self, path):
+        return self._metas[0] if path == "ref" else self._metas[1]
+
+    def score_candidate(self, ref_video, esp_video_original, ref_time, delay_ms, tempo=1.0, *args, **kwargs):
+        expected_tempo = self._metas[0].avg_fps / self._metas[1].avg_fps
+        score = self._planned_score if abs(tempo - expected_tempo) < 0.0000001 else self._nominal_score
+        return {"ok": True, "mean_ssim": score, "frames": 4}
+
+
+def fake_meta(path, duration, fps, real_fps=None, vfr=False):
+    return VideoMetadata(path, duration, fps, real_fps or fps, 1920, 1080, "yuv420p", "bt709", vfr)
+
+
+class FpsConfirmationTests(unittest.TestCase):
+    def assert_confirmed_pair(self, ref_fps, esp_fps):
+        tempo = ref_fps / esp_fps
+        verifier = DeterministicFpsVerifier(
+            fake_meta("ref", 100.0, ref_fps),
+            fake_meta("esp", 100.0 * tempo, esp_fps),
+        )
+        result = verifier.confirm_fps_plan("ref", "esp", ref_fps, esp_fps, "pelicula")
+        self.assertTrue(result["planned"])
+        self.assertTrue(result["confirmed"])
+        self.assertAlmostEqual(result["tempo"], tempo, places=9)
+
+    def test_24_to_23976_is_confirmable(self):
+        self.assert_confirmed_pair(24000 / 1001, 24.0)
+
+    def test_25_to_23976_is_confirmable(self):
+        self.assert_confirmed_pair(24000 / 1001, 25.0)
+
+    def test_23976_to_25_is_confirmable(self):
+        self.assert_confirmed_pair(25.0, 24000 / 1001)
+
+    def test_equal_fps_needs_no_plan(self):
+        verifier = DeterministicFpsVerifier(fake_meta("ref", 100, 24), fake_meta("esp", 100, 24))
+        result = verifier.confirm_fps_plan("ref", "esp", 24, 24, "pelicula")
+        self.assertFalse(result["planned"])
+        self.assertEqual(result["reason"], "fps_iguales")
+
+    def test_metadata_only_difference_is_rejected_by_duration(self):
+        verifier = DeterministicFpsVerifier(fake_meta("ref", 100, 24), fake_meta("esp", 100, 25))
+        result = verifier.confirm_fps_plan("ref", "esp", 24, 25, "pelicula")
+        self.assertFalse(result["confirmed"])
+        self.assertEqual(result["reason"], "duracion_no_confirma_tempo")
+
+    def test_vfr_is_not_automatically_confirmed(self):
+        tempo = (24000 / 1001) / 24
+        verifier = DeterministicFpsVerifier(
+            fake_meta("ref", 100, 24000 / 1001, vfr=True),
+            fake_meta("esp", 100 * tempo, 24),
+        )
+        result = verifier.confirm_fps_plan("ref", "esp", 24000 / 1001, 24, "pelicula")
+        self.assertFalse(result["confirmed"])
+        self.assertEqual(result["reason"], "vfr_no_confirmado")
 
 
 @unittest.skipUnless(

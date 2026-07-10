@@ -27,6 +27,7 @@ from api._core.utils import esc
 LOG_ROOT = "/logs/delay_audio"
 PREVIEW_ROOT = "/logs/delay_audio_preview"
 MOTOR = "/motor/delay_audio/medir_delay_audio.py"
+MOTOR_VISUAL = "/motor/delay_audio/verificacion_visual.py"
 CONFIG_PATH = "/config/delay_audio.json"
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".ts", ".mov", ".wmv"}
 DATA_ROOT = os.environ.get("DELAY_AUDIO_DATA_ROOT", "/data")
@@ -54,6 +55,9 @@ DEFAULT_CONFIG = {
     "carpeta_salida": COMPLETE_MOVIES_PATH,
     "sub_video_bueno": "INGLES",
     "sub_fuente_espanol": "ESPAÑOL delay audio",
+    "hybrid": {
+        "enabled": False,
+    },
 }
 ROOTS = [
     {"key": "data", "label": "Data", "path": DATA_ROOT},
@@ -64,6 +68,12 @@ ROOT_BUTTON_ORDER = ("media", "data")
 _JOBS = {}
 _LOCK = threading.Lock()
 DUPLICATE_JOB_GRACE_SEC = 30
+
+
+def hybrid_enabled(config=None):
+    config = config if isinstance(config, dict) else leer_config()
+    hybrid = config.get("hybrid") if isinstance(config.get("hybrid"), dict) else {}
+    return hybrid.get("enabled") is True
 
 
 def job_activo_misma_salida(ref, esp, ref_audio, esp_audio, output_dir, delay_hint_ms=0):
@@ -470,6 +480,8 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
             "created": time.time(),
             "ref": ref,
             "esp": esp,
+            "esp_video_original": esp,
+            "esp_audio_medicion": esp,
             "ref_audio": ref_audio,
             "esp_audio": esp_audio,
             "delay_hint_ms": delay_hint_ms,
@@ -482,6 +494,7 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
             "returncode": None,
             "error": "",
             "fps_correction": fps_correction,
+            "hybrid_enabled": hybrid_enabled(cfg),
         }
         _JOBS[job_id] = job
     diagnostico_init(job, "delay_audio", inputs={
@@ -496,6 +509,7 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
         "carpeta_salida": output_dir,
         "delay_hint_ms": delay_hint_ms,
         "fps_correction": fps_correction,
+        "hybrid_enabled": hybrid_enabled(cfg),
     })
     diagnostico_event(job, "validate_inputs", "finished", "Entradas validadas", {
         "video_bueno": ref,
@@ -516,24 +530,58 @@ def _ejecutar_job(job):
     temp_cleanup_paths = []
     try:
         fps_correction = job.get("fps_correction") or {}
-        if fps_correction.get("enabled"):
+        if job.get("hybrid_enabled") and fps_correction.get("planned"):
+            fps_correction = confirmar_plan_fps(job, fps_correction, profile)
+            job["fps_correction"] = fps_correction
+            if not fps_correction.get("confirmed"):
+                result = resultado_fps_no_confirmados(job, fps_correction, profile)
+                escribir_json(job["result_path"], result)
+                escribir_progreso(job, "done", 100, "Bloqueado")
+                job["status"] = "done"
+                diagnostico_event(job, "decision", "fps_no_confirmados", "Plan FPS no confirmado", {
+                    "reason": fps_correction.get("reason"),
+                    "ref_fps": fps_correction.get("ref_fps"),
+                    "esp_fps": fps_correction.get("esp_fps"),
+                    "tempo": fps_correction.get("tempo"),
+                }, level="error")
+                diagnostico_finish(job, "done", result)
+                return
+
+        if fps_correction.get("enabled") and (
+            not job.get("hybrid_enabled") or fps_correction.get("confirmed")
+        ):
             preparar_audio_fps_medicion(job, fps_correction, temp_cleanup_paths)
 
-        esp_measure_path = job.get("esp_measure_path") or job["esp"]
+        esp_measure_path = job.get("esp_audio_medicion") or job.get("esp_measure_path") or job["esp"]
         esp_measure_audio = job.get("esp_measure_audio", job.get("esp_audio"))
         cmd = ["python", MOTOR, "--ref", job["ref"], "--esp", esp_measure_path, "--job-dir", job["job_dir"], "--profile", profile]
+        cmd += ["--esp-video-original", job.get("esp_video_original") or job["esp"]]
         if job.get("ref_audio") != "":
             cmd += ["--ref-audio-index", str(job["ref_audio"])]
         if esp_measure_audio != "":
             cmd += ["--esp-audio-index", str(esp_measure_audio)]
         if int(job.get("delay_hint_ms") or 0) != 0:
             cmd += ["--delay-hint-ms", str(int(job.get("delay_hint_ms") or 0))]
+        if fps_correction.get("ref_fps"):
+            cmd += ["--fps-ref", str(fps_correction.get("ref_fps"))]
+        if fps_correction.get("esp_fps"):
+            cmd += ["--fps-esp", str(fps_correction.get("esp_fps"))]
+        if fps_correction.get("tempo"):
+            cmd += ["--fps-tempo", str(fps_correction.get("tempo"))]
+        if fps_correction.get("planned"):
+            cmd += ["--fps-plan-enabled"]
+        if fps_correction.get("confirmed"):
+            cmd += ["--fps-plan-confirmed"]
+        if job.get("hybrid_enabled"):
+            cmd += ["--hybrid-enabled"]
         diagnostico_update(job, status="running", profile=profile, delay_hint_ms=int(job.get("delay_hint_ms") or 0))
         diagnostico_event(job, "measure_setup", "started", "Arranca motor de medicion", {
             "profile": profile,
             "stdout_log": stdout_path,
             "delay_hint_ms": int(job.get("delay_hint_ms") or 0),
             "fps_correction": fps_correction,
+            "esp_video_original": job.get("esp_video_original") or job["esp"],
+            "esp_audio_medicion": esp_measure_path,
         })
         started_at = time.time()
         with open(stdout_path, "w", encoding="utf-8") as out:
@@ -566,6 +614,93 @@ def _ejecutar_job(job):
         for path in temp_cleanup_paths:
             diagnostico_event(job, "cleanup", "remove_temp", "Eliminando temporal propio", {"path": path})
             limpiar_archivo_silencioso(path)
+
+
+def confirmar_plan_fps(job, fps_plan, profile):
+    diagnostico_event(job, "fps_plan", "started", "Confirmando plan FPS", {
+        "profile": profile,
+        "ref_fps": fps_plan.get("ref_fps"),
+        "esp_fps": fps_plan.get("esp_fps"),
+        "tempo": fps_plan.get("tempo"),
+    })
+    cmd = [
+        "python",
+        MOTOR_VISUAL,
+        "confirm-fps",
+        "--ref",
+        job["ref"],
+        "--esp-video-original",
+        job.get("esp_video_original") or job["esp"],
+        "--profile",
+        profile,
+        "--fps-ref",
+        str(fps_plan.get("ref_fps")),
+        "--fps-esp",
+        str(fps_plan.get("esp_fps")),
+    ]
+    started_at = time.time()
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        timeout=900,
+    )
+    diagnostico_command(
+        job,
+        "fps_plan",
+        "confirm_fps_plan",
+        cmd,
+        proc.returncode,
+        started_at,
+        proc.stdout,
+        proc.stderr,
+        proc.returncode == 0,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "No se pudo confirmar el plan FPS").strip()
+        raise RuntimeError(detail[-800:])
+    try:
+        confirmation = json.loads(proc.stdout or "{}")
+    except Exception as exc:
+        raise RuntimeError("La confirmación FPS no devolvió JSON válido") from exc
+    if not isinstance(confirmation, dict):
+        raise RuntimeError("La confirmación FPS devolvió un resultado inválido")
+    result = dict(fps_plan)
+    result.update(confirmation)
+    result["enabled"] = bool(result.get("confirmed"))
+    result["applied"] = False
+    event_name = "confirmed" if result.get("confirmed") else "rejected"
+    diagnostico_event(job, "fps_plan", event_name, "Plan FPS confirmado" if result.get("confirmed") else "Plan FPS rechazado", {
+        "reason": result.get("reason"),
+        "ref_fps": result.get("ref_fps"),
+        "esp_fps": result.get("esp_fps"),
+        "tempo": result.get("tempo"),
+        "duration": result.get("duration"),
+        "visual": result.get("visual"),
+    }, level="info" if result.get("confirmed") else "error")
+    return result
+
+
+def resultado_fps_no_confirmados(job, fps_correction, profile):
+    return {
+        "ok": False,
+        "state": "FPS_NO_CONFIRMADOS",
+        "export_allowed": False,
+        "delay_ms": 0,
+        "confidence": "BAJA",
+        "profile": profile,
+        "fps_correction": fps_correction,
+        "visual": fps_correction.get("visual") or {},
+        "audio": {},
+        "decision": {
+            "reason": fps_correction.get("reason") or "fps_no_confirmados",
+            "contradictions": ["fps_plan_not_confirmed"],
+        },
+        "log_path": job.get("log_path"),
+        "csv_path": job.get("csv_path"),
+    }
 
 
 def exportar_si_corresponde(job):
@@ -627,7 +762,7 @@ def exportar_si_corresponde(job):
     published_output = False
     try:
         diagnostico_event(job, "normalize_audio", "started", "Preparando audio espanol", {"delay_ms": delay_ms})
-        audio_source_path = job.get("fps_audio_path") or job["esp"]
+        audio_source_path = job.get("esp_audio_medicion") or job.get("fps_audio_path") or job["esp"]
         audio_source_index = job.get("fps_audio_index", job.get("esp_audio"))
         audio_track_id = mkvmerge_track_id_for_ffprobe_index(audio_source_path, audio_source_index, "audio")
         audio_input = preparar_audio_espanol_exportacion(
@@ -1263,19 +1398,25 @@ def planificar_correccion_fps(ref, esp):
     ref_fps = float(ref_meta.get("fps_value") or 0.0)
     esp_fps = float(esp_meta.get("fps_value") or 0.0)
     if not ref_fps or not esp_fps:
-        return {"enabled": False, "reason": "fps_no_detectado"}
+        return {"planned": False, "enabled": False, "confirmed": False, "applied": False, "reason": "fps_no_detectado"}
     if abs(round(ref_fps, 3) - round(esp_fps, 3)) <= FPS_CORRECTION_THRESHOLD:
         return {
+            "planned": False,
             "enabled": False,
+            "confirmed": False,
+            "applied": False,
             "reason": "fps_iguales",
             "ref_fps": round(ref_fps, 6),
             "esp_fps": round(esp_fps, 6),
         }
     tempo = ref_fps / esp_fps
     if not tempo or tempo <= 0:
-        return {"enabled": False, "reason": "tempo_no_valido"}
+        return {"planned": False, "enabled": False, "confirmed": False, "applied": False, "reason": "tempo_no_valido"}
     return {
+        "planned": True,
         "enabled": True,
+        "confirmed": False,
+        "applied": False,
         "ref_fps": round(ref_fps, 6),
         "esp_fps": round(esp_fps, 6),
         "tempo": round(tempo, 9),
@@ -1350,7 +1491,9 @@ def preparar_audio_fps_medicion(job, fps_correction, temp_cleanup_paths):
     job["fps_audio_path"] = temp_audio_path
     job["fps_audio_index"] = 0
     job["esp_measure_path"] = temp_audio_path
+    job["esp_audio_medicion"] = temp_audio_path
     job["esp_measure_audio"] = 0
+    fps_correction["applied"] = True
     diagnostico_event(job, "fps_correction", "finished", "Audio FPS preparado", {
         "path": temp_audio_path,
         "tempo": tempo,
@@ -1468,7 +1611,11 @@ def anexar_correccion_fps_resultado(job):
     if not isinstance(result, dict) or not result.get("ok"):
         return
     result["fps_correction"] = {
-        "enabled": True,
+        "planned": bool(fps_correction.get("planned", fps_correction.get("enabled"))),
+        "enabled": bool(fps_correction.get("enabled")),
+        "confirmed": bool(fps_correction.get("confirmed")),
+        "applied": bool(fps_correction.get("applied")),
+        "reason": fps_correction.get("reason") or ("legacy_fps_difference" if not job.get("hybrid_enabled") else ""),
         "ref_fps": fps_correction.get("ref_fps"),
         "esp_fps": fps_correction.get("esp_fps"),
         "tempo": fps_correction.get("tempo"),
