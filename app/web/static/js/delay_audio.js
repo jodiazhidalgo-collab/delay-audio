@@ -907,35 +907,30 @@ function normalizeWorkshopFps(value) {
   return Number.isFinite(fps) && fps > 0 ? fps.toFixed(3) : "";
 }
 
+function workshopEditCanHelp(state) {
+  if (workshopJobRunning(state)) return false;
+  const result = state?.result || {};
+  return result.state === "NO_FIABLE"
+    && result.export_allowed === false
+    && String(result?.decision?.reason || "") === "descubrimiento_sin_evidencia_suficiente";
+}
+
 function workshopMetaAlerts(state) {
   const refFps = normalizeWorkshopFps(state?.ref?.fps);
   const espFps = normalizeWorkshopFps(state?.esp?.fps);
   const refDuration = parseWorkshopDurationSeconds(state?.ref?.duration);
   const espDuration = parseWorkshopDurationSeconds(state?.esp?.duration);
-  const settings = workshopSettings(state);
-  const profile = settings.perfil === "trailer" ? "trailer" : "pelicula";
-  const profileKey = profile === "trailer" ? "trailer" : "movie";
-  const configuredHint = settings?.hybrid?.[profileKey]?.edit_hint || {};
-  const yellowMs = Number(configuredHint.yellow_ms || (profile === "trailer" ? 2000 : 5000));
-  const redMs = Number(configuredHint.red_ms || (profile === "trailer" ? 5000 : 15000));
-  const savedHint = workshopDelayHintMs(state);
-  const verifiedDelay = state?.result?.state === "OK_VERIFICADO" ? Number(state.result.delay_ms) : 0;
-  const estimatedOffset = savedHint || (Number.isFinite(verifiedDelay) ? Math.round(verifiedDelay) : 0);
-  const absoluteOffset = Math.abs(estimatedOffset);
-  const editHelp = absoluteOffset >= redMs
-    ? { level: "red", text: "Ayuda muy recomendable", offsetMs: estimatedOffset }
-    : absoluteOffset >= yellowMs
-      ? { level: "yellow", text: "Ayuda recomendada", offsetMs: estimatedOffset }
-      : { level: "", text: "", offsetMs: estimatedOffset };
   return {
     fpsMismatch: Boolean(refFps && espFps && refFps !== espFps),
-    durationWarning: refDuration !== null && espDuration !== null && Math.abs(refDuration - espDuration) >= 10,
-    editHelp
+    durationWarning: refDuration !== null && espDuration !== null && Math.abs(refDuration - espDuration) > 10,
+    editCanHelp: workshopEditCanHelp(state)
   };
 }
 
 function workshopMetaClass(type, alerts) {
-  if (type === "duration" && alerts?.durationWarning) return " is-duration-warning";
+  if (type === "duration" && alerts?.durationWarning) {
+    return alerts?.editCanHelp ? " is-duration-help-red" : " is-duration-warning";
+  }
   if (type === "fps" && alerts?.fpsMismatch) return " is-fps-mismatch";
   return "";
 }
@@ -949,12 +944,7 @@ function renderWorkshopMetaPill(value, type, alerts) {
 function renderWorkshopSlot(kind, slot, alerts = {}) {
   const selected = Boolean(slot?.path);
   const label = workshopSlotLabel(kind);
-  const editHelp = alerts?.editHelp || {};
-  const editWarningClass = editHelp.level === "red"
-    ? " is-help-red"
-    : editHelp.level === "yellow"
-      ? " is-help-yellow"
-      : "";
+  const editWarningClass = alerts?.editCanHelp ? " is-help-red" : "";
   return `
     <section class="workshop-slot ${selected ? "has-video" : ""}">
       <div class="workshop-slot-head">
@@ -962,7 +952,7 @@ function renderWorkshopSlot(kind, slot, alerts = {}) {
           <div class="workshop-kicker">${escapeHtml(label)}</div>
           <h2>${selected ? escapeHtml(slot.name || "Video seleccionado") : "Sin seleccionar"}</h2>
         </div>
-        ${selected ? `<button class="workshop-mini workshop-edit${editWarningClass}" type="button" data-workshop-preview-open><span>Editar</span>${editHelp.text ? `<small>${escapeHtml(editHelp.text)}</small>` : ""}</button>` : ""}
+        ${selected ? `<button class="workshop-mini workshop-edit${editWarningClass}" type="button" data-workshop-preview-open><span>Editar</span></button>` : ""}
       </div>
       ${selected ? `
         <div class="workshop-meta">
@@ -3727,7 +3717,7 @@ function acceptWorkshopPreviewHint() {
   clearWorkshopResultFields(state);
   saveWorkshopState(state);
   workshopPreviewModalOpen = false;
-  statusText.textContent = state.delayHintMs ? "Ayuda visual aplicada" : "Ayuda visual limpia";
+  statusText.textContent = "Taller listo";
   render(lastData);
 }
 
@@ -3737,7 +3727,7 @@ function resetWorkshopDelayHintMain() {
   state.delayHintMs = 0;
   clearWorkshopResultFields(state);
   saveWorkshopState(state);
-  statusText.textContent = "Ayuda visual limpia";
+  statusText.textContent = "Taller listo";
   render(lastData);
 }
 

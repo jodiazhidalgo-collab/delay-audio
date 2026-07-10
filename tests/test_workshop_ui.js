@@ -212,34 +212,68 @@ async function main() {
 
   const baseSlot = { path: "ref.mkv", name: "Ref", audio: 0, duration: "01:40:00", fps: "24.000" };
   harness.setState({
+    status: "done",
+    ref: baseSlot,
+    esp: { ...baseSlot, path: "esp.mkv", duration: "01:42:00" },
+    delayHintMs: 16000,
+    settings: { modo: "medir", perfil: "pelicula" },
+    result: { state: "OK_VERIFICADO", export_allowed: true, delay_ms: 16000 }
+  });
+  const verifiedHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
+  assert.match(verifiedHtml, /is-duration-warning/);
+  assert.doesNotMatch(verifiedHtml, /is-duration-help-red|is-help-red/);
+  assert.doesNotMatch(verifiedHtml, /Ayuda recomendada|Ayuda muy recomendable/);
+  assert.match(verifiedHtml, /<span>Editar<\/span><\/button>/);
+
+  harness.setState({
+    status: "done",
     ref: baseSlot,
     esp: { ...baseSlot, path: "esp.mkv", duration: "01:42:00" },
     delayHintMs: 0,
-    settings: { modo: "medir", perfil: "pelicula" }
+    settings: { modo: "medir", perfil: "pelicula" },
+    result: {
+      state: "NO_FIABLE",
+      export_allowed: false,
+      decision: { reason: "descubrimiento_sin_evidencia_suficiente" }
+    }
   });
-  const durationOnlyHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
-  assert.doesNotMatch(durationOnlyHtml, /Ayuda recomendada/);
-  assert.doesNotMatch(durationOnlyHtml, /is-help-yellow/);
+  const helpableFailureHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
+  assert.match(helpableFailureHtml, /workshop-edit is-help-red/);
+  assert.match(helpableFailureHtml, /is-duration-help-red/);
+  assert.doesNotMatch(helpableFailureHtml, /Ayuda recomendada|Ayuda muy recomendable|<small>/);
+  assert.match(helpableFailureHtml, /<span>Editar<\/span><\/button>/);
 
   harness.setState({
+    status: "done",
     ref: baseSlot,
-    esp: { ...baseSlot, path: "esp.mkv" },
-    delayHintMs: 6000,
-    settings: { modo: "medir", perfil: "pelicula" }
-  });
-  const yellowEditHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
-  assert.match(yellowEditHtml, /Ayuda recomendada/);
-  assert.match(yellowEditHtml, /is-help-yellow/);
-
-  harness.setState({
-    ref: baseSlot,
-    esp: { ...baseSlot, path: "esp.mkv" },
+    esp: { ...baseSlot, path: "esp.mkv", duration: "01:42:00" },
     delayHintMs: 16000,
-    settings: { modo: "medir", perfil: "pelicula" }
+    settings: { modo: "medir", perfil: "pelicula" },
+    result: {
+      state: "MONTAJE_DISTINTO",
+      export_allowed: false,
+      decision: { reason: "ningun_delay_fijo_explica_las_zonas" }
+    }
   });
-  const redEditHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
-  assert.match(redEditHtml, /Ayuda muy recomendable/);
-  assert.match(redEditHtml, /is-help-red/);
+  const montageHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
+  assert.match(montageHtml, /is-duration-warning/);
+  assert.doesNotMatch(montageHtml, /is-duration-help-red|is-help-red/);
+
+  harness.setState({
+    status: "running",
+    ref: baseSlot,
+    esp: { ...baseSlot, path: "esp.mkv", duration: "01:42:00" },
+    settings: { modo: "medir", perfil: "pelicula" },
+    result: {
+      state: "NO_FIABLE",
+      export_allowed: false,
+      decision: { reason: "descubrimiento_sin_evidencia_suficiente" }
+    }
+  });
+  const runningHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
+  assert.match(runningHtml, /is-duration-warning/);
+  assert.doesNotMatch(runningHtml, /is-duration-help-red|is-help-red/);
+  assert.doesNotMatch(source, /Ayuda visual aplicada|Ayuda visual limpia|Ayuda recomendada|Ayuda muy recomendable/);
 
   const hybridEvidenceHtml = harness.evaluate(`renderWorkshopHybridEvidence(
     { requested_mode: "medir" },
