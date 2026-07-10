@@ -1,0 +1,778 @@
+#!/usr/bin/env python3
+"""Comparador visual ligero para Taller.
+
+Usa ráfagas cortas normalizadas y el filtro SSIM de FFmpeg. No genera
+fotogramas, clips ni ficheros de estadísticas: toda la evidencia se lee de
+stdout/stderr y se devuelve como JSON serializable.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import subprocess
+import time
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable
+
+
+SSIM_RE = re.compile(r"\bAll:([-+]?[0-9]*\.?[0-9]+)")
+FINAL_STATES = {"FUERTE", "VALIDA", "SOSPECHOSA", "INUTIL"}
+
+DEFAULT_VISUAL_CONFIG: dict[str, dict[str, Any]] = {
+    "pelicula": {
+        "visual_zone_pcts": [18, 50, 82],
+        "visual_zone_fallback_pcts": [10, 30, 70, 90, 40, 60],
+        "visual_burst_sec": 2.0,
+        "visual_fps": 2.0,
+        "visual_width": 192,
+        "visual_height": 108,
+        "visual_crop_safe_pct": 90,
+        "visual_strong_min": 0.88,
+        "visual_valid_min": 0.80,
+        "visual_margin_strong": 0.08,
+        "visual_margin_valid": 0.05,
+        "visual_required_zones": 3,
+        "visual_required_strong": 2,
+        "visual_max_zones": 7,
+        "visual_competitor_ms": 400,
+    },
+    "trailer": {
+        "visual_zone_pcts": [22, 58, 82],
+        "visual_zone_fallback_pcts": [35, 75, 15, 88],
+        "visual_burst_sec": 1.5,
+        "visual_fps": 2.0,
+        "visual_width": 160,
+        "visual_height": 90,
+        "visual_crop_safe_pct": 90,
+        "visual_strong_min": 0.88,
+        "visual_valid_min": 0.80,
+        "visual_margin_strong": 0.08,
+        "visual_margin_valid": 0.05,
+        "visual_required_zones": 2,
+        "visual_required_strong": 1,
+        "visual_max_zones": 4,
+        "visual_competitor_ms": 400,
+    },
+}
+
+
+def _finite_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if math.isfinite(number) else fallback
+
+
+def _even(value: float, minimum: int = 2) -> int:
+    number = max(minimum, int(round(value)))
+    return number if number % 2 == 0 else number - 1
+
+
+def map_ref_to_esp_time(ref_time: float, delay_sec: float = 0.0, tempo: float = 1.0) -> float:
+    """Mapea tiempo maestro a tiempo del vídeo español original.
+
+    Un delay positivo significa que el audio español debe empezar más tarde en
+    la línea temporal maestra. La imagen equivalente del origen español está,
+    por tanto, antes: ``(t_ref - delay) * tempo``.
+    """
+
+    ref_value = _finite_float(ref_time, -1.0)
+    delay_value = _finite_float(delay_sec)
+    tempo_value = _finite_float(tempo, -1.0)
+    if ref_value < 0:
+        raise ValueError("ref_time debe ser positivo")
+    if tempo_value <= 0:
+        raise ValueError("tempo debe ser mayor que cero")
+    return (ref_value - delay_value) * tempo_value
+
+
+def profile_config(profile: str, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    key = "trailer" if str(profile).lower() == "trailer" else "pelicula"
+    result = deepcopy(DEFAULT_VISUAL_CONFIG[key])
+    if isinstance(overrides, dict):
+        result.update({name: value for name, value in overrides.items() if value is not None})
+    return result
+
+
+def pick_zones(duration: float, profile: str = "pelicula", config: dict[str, Any] | None = None) -> list[dict[str, float]]:
+    cfg = profile_config(profile, config)
+    duration_value = _finite_float(duration)
+    burst = _finite_float(cfg.get("visual_burst_sec"), 2.0)
+    if duration_value <= 0 or burst <= 0 or duration_value < burst:
+        return []
+
+    initial = list(cfg.get("visual_zone_pcts") or [])
+    if str(profile).lower() == "trailer" and duration_value <= 45:
+        initial = initial[:2]
+    fallback = list(cfg.get("visual_zone_fallback_pcts") or [])
+    max_start = max(0.0, duration_value - burst - 0.05)
+    zones: list[dict[str, float]] = []
+    seen: set[int] = set()
+    for origin, values in (("initial", initial), ("fallback", fallback)):
+        for raw_pct in values:
+            pct = max(0.0, min(100.0, _finite_float(raw_pct)))
+            start = min(max_start, max(0.0, duration_value * pct / 100.0))
+            bucket = int(round(start * 1000))
+            if bucket in seen:
+                continue
+            seen.add(bucket)
+            zones.append({"pct": pct, "start_sec": round(start, 6), "origin": origin})
+    return zones
+
+
+@dataclass
+class VideoMetadata:
+    path: str
+    duration: float
+    avg_fps: float
+    real_fps: float
+    width: int
+    height: int
+    pix_fmt: str
+    color_transfer: str
+    variable_frame_rate: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "duration": self.duration,
+            "avg_fps": self.avg_fps,
+            "real_fps": self.real_fps,
+            "width": self.width,
+            "height": self.height,
+            "pix_fmt": self.pix_fmt,
+            "color_transfer": self.color_transfer,
+            "variable_frame_rate": self.variable_frame_rate,
+        }
+
+
+class VisualVerifier:
+    def __init__(
+        self,
+        ffmpeg: str = "ffmpeg",
+        ffprobe: str = "ffprobe",
+        timeout: int = 180,
+        profile_overrides: dict[str, dict[str, Any]] | None = None,
+        event_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
+    ) -> None:
+        self.ffmpeg = ffmpeg
+        self.ffprobe = ffprobe
+        self.timeout = int(timeout)
+        self.profile_overrides = profile_overrides or {}
+        self.event_callback = event_callback
+
+    def _event(self, phase: str, event: str, data: dict[str, Any]) -> None:
+        if self.event_callback:
+            self.event_callback(phase, event, data)
+
+    def config(self, profile: str) -> dict[str, Any]:
+        key = "trailer" if str(profile).lower() == "trailer" else "pelicula"
+        return profile_config(key, self.profile_overrides.get(key))
+
+    def probe_video(self, path: str) -> VideoMetadata:
+        if not path or not os.path.isfile(path):
+            raise RuntimeError(f"No existe el vídeo visual: {path}")
+        cmd = [
+            self.ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration,avg_frame_rate,r_frame_rate,width,height,pix_fmt,color_transfer:stream_tags=DURATION",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            path,
+        ]
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            timeout=self.timeout,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout or "ffprobe visual falló").strip()[-800:])
+        try:
+            raw = json.loads(proc.stdout or "{}")
+            stream = (raw.get("streams") or [])[0]
+        except (ValueError, IndexError, TypeError) as exc:
+            raise RuntimeError("ffprobe no devolvió vídeo válido") from exc
+
+        duration = _parse_duration(stream.get("duration"))
+        if duration <= 0:
+            duration = _parse_duration((stream.get("tags") or {}).get("DURATION"))
+        if duration <= 0:
+            duration = _parse_duration((raw.get("format") or {}).get("duration"))
+        avg_fps = _parse_rate(stream.get("avg_frame_rate"))
+        real_fps = _parse_rate(stream.get("r_frame_rate"))
+        if duration <= 0 or avg_fps <= 0:
+            raise RuntimeError("Metadatos visuales incompletos")
+        return VideoMetadata(
+            path=os.path.abspath(path),
+            duration=duration,
+            avg_fps=avg_fps,
+            real_fps=real_fps or avg_fps,
+            width=int(stream.get("width") or 0),
+            height=int(stream.get("height") or 0),
+            pix_fmt=str(stream.get("pix_fmt") or ""),
+            color_transfer=str(stream.get("color_transfer") or ""),
+            variable_frame_rate=bool(real_fps and abs(real_fps - avg_fps) > 0.01),
+        )
+
+    def score_candidate(
+        self,
+        ref_video: str,
+        esp_video_original: str,
+        ref_time: float,
+        delay_ms: int | float,
+        tempo: float = 1.0,
+        profile: str = "pelicula",
+        ref_duration: float | None = None,
+        esp_duration: float | None = None,
+    ) -> dict[str, Any]:
+        cfg = self.config(profile)
+        burst = _finite_float(cfg.get("visual_burst_sec"), 2.0)
+        delay_value = _finite_float(delay_ms) / 1000.0
+        tempo_value = _finite_float(tempo, 1.0)
+        started = time.monotonic()
+        try:
+            esp_time = map_ref_to_esp_time(ref_time, delay_value, tempo_value)
+            if ref_time < 0 or esp_time < 0:
+                raise ValueError("posición visual fuera de rango")
+            if ref_duration and ref_time + burst > float(ref_duration) + 0.05:
+                raise ValueError("ráfaga maestra fuera de rango")
+            esp_source_burst = burst * tempo_value
+            if esp_duration and esp_time + esp_source_burst > float(esp_duration) + 0.05:
+                raise ValueError("ráfaga española fuera de rango")
+            scores, command_seconds = self._run_ssim(
+                ref_video,
+                esp_video_original,
+                ref_time,
+                esp_time,
+                tempo_value,
+                cfg,
+            )
+            mean = sum(scores) / len(scores)
+            return {
+                "ok": True,
+                "delay_ms": int(round(_finite_float(delay_ms))),
+                "ref_time": round(float(ref_time), 6),
+                "esp_time": round(float(esp_time), 6),
+                "tempo": round(tempo_value, 9),
+                "mean_ssim": round(mean, 6),
+                "min_ssim": round(min(scores), 6),
+                "max_ssim": round(max(scores), 6),
+                "frames": len(scores),
+                "duration_sec": round(time.monotonic() - started, 3),
+                "command_sec": round(command_seconds, 3),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "delay_ms": int(round(_finite_float(delay_ms))),
+                "ref_time": round(float(ref_time), 6),
+                "tempo": round(tempo_value, 9),
+                "error": str(exc),
+                "duration_sec": round(time.monotonic() - started, 3),
+            }
+
+    def _run_ssim(
+        self,
+        ref_video: str,
+        esp_video_original: str,
+        ref_time: float,
+        esp_time: float,
+        tempo: float,
+        cfg: dict[str, Any],
+    ) -> tuple[list[float], float]:
+        burst = _finite_float(cfg.get("visual_burst_sec"), 2.0)
+        sample_fps = _finite_float(cfg.get("visual_fps"), 2.0)
+        width = _even(_finite_float(cfg.get("visual_width"), 192))
+        height = _even(_finite_float(cfg.get("visual_height"), 108))
+        crop_pct = max(50.0, min(100.0, _finite_float(cfg.get("visual_crop_safe_pct"), 90.0)))
+        crop_width = _even(width * crop_pct / 100.0)
+        crop_height = _even(height * crop_pct / 100.0)
+        crop_x = max(0, (width - crop_width) // 2)
+        crop_y = max(0, (height - crop_height) // 2)
+        esp_source_burst = burst * tempo
+        ref_read = burst + max(0.75, 1.0 / sample_fps)
+        esp_read = esp_source_burst + max(0.75, tempo / sample_fps)
+
+        common = (
+            f"fps={sample_fps:.6f},"
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
+            "format=gbrp,normalize=smoothing=2:independence=0:strength=1,format=gray,"
+            f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y},settb=AVTB"
+        )
+        ref_filter = f"trim=duration={burst:.6f},setpts=PTS-STARTPTS,{common}"
+        esp_filter = (
+            f"trim=duration={esp_source_burst:.6f},"
+            f"setpts=(PTS-STARTPTS)/{tempo:.12f},{common}"
+        )
+        filter_graph = (
+            f"[0:v:0]{ref_filter}[ref];"
+            f"[1:v:0]{esp_filter}[esp];"
+            "[ref][esp]ssim=stats_file=-"
+        )
+        cmd = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-v",
+            "error",
+            "-ss",
+            f"{ref_time:.6f}",
+            "-t",
+            f"{ref_read:.6f}",
+            "-i",
+            ref_video,
+            "-ss",
+            f"{esp_time:.6f}",
+            "-t",
+            f"{esp_read:.6f}",
+            "-i",
+            esp_video_original,
+            "-filter_complex",
+            filter_graph,
+            "-an",
+            "-sn",
+            "-dn",
+            "-f",
+            "null",
+            "-",
+        ]
+        started = time.monotonic()
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            timeout=self.timeout,
+        )
+        elapsed = time.monotonic() - started
+        combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        if proc.returncode != 0:
+            raise RuntimeError((combined.strip() or "FFmpeg SSIM falló")[-1000:])
+        scores = [float(value) for value in SSIM_RE.findall(combined)]
+        expected_min = max(2, int(math.floor(burst * sample_fps)) - 1)
+        if len(scores) < expected_min:
+            raise RuntimeError(f"SSIM devolvió pocos frames: {len(scores)}")
+        return scores, elapsed
+
+    def score_candidates(
+        self,
+        ref_video: str,
+        esp_video_original: str,
+        candidate_delays_ms: Iterable[int | float],
+        profile: str = "pelicula",
+        tempo: float = 1.0,
+        stage: str = "visual_gate",
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        ref_meta = self.probe_video(ref_video)
+        esp_meta = self.probe_video(esp_video_original)
+        cfg = self.config(profile)
+        base_candidates = _unique_ints(candidate_delays_ms)
+        if not base_candidates:
+            base_candidates = [0]
+        competitor_ms = int(cfg.get("visual_competitor_ms") or 400)
+        required = int(cfg.get("visual_required_zones") or 1)
+        required_strong = int(cfg.get("visual_required_strong") or 1)
+        max_zones = int(cfg.get("visual_max_zones") or required)
+        zones = pick_zones(ref_meta.duration, profile, cfg)
+        zone_results: list[dict[str, Any]] = []
+        valid_zones: list[dict[str, Any]] = []
+        self._event(stage, "started", {
+            "profile": profile,
+            "candidates": base_candidates,
+            "tempo": tempo,
+        })
+
+        for zone in zones:
+            if len(zone_results) >= max_zones:
+                break
+            evaluated = set(base_candidates)
+            for candidate in base_candidates:
+                evaluated.add(candidate - competitor_ms)
+                evaluated.add(candidate + competitor_ms)
+                if candidate != 0:
+                    evaluated.add(0)
+            raw_scores: dict[int, dict[str, Any]] = {}
+            for delay in sorted(evaluated):
+                raw_scores[delay] = self.score_candidate(
+                    ref_video,
+                    esp_video_original,
+                    zone["start_sec"],
+                    delay,
+                    tempo,
+                    profile,
+                    ref_meta.duration,
+                    esp_meta.duration,
+                )
+
+            evidence: list[dict[str, Any]] = []
+            for candidate in base_candidates:
+                own = raw_scores.get(candidate) or {}
+                competitors = [candidate - competitor_ms, candidate + competitor_ms]
+                if candidate != 0:
+                    competitors.append(0)
+                competitor_scores = [
+                    raw_scores[item]["mean_ssim"]
+                    for item in competitors
+                    if raw_scores.get(item, {}).get("ok")
+                ]
+                own_score = own.get("mean_ssim") if own.get("ok") else None
+                best_competitor = max(competitor_scores) if competitor_scores else None
+                margin = None
+                if own_score is not None and best_competitor is not None:
+                    margin = float(own_score) - float(best_competitor)
+                evidence.append({
+                    "delay_ms": candidate,
+                    "mean_ssim": own_score,
+                    "margin": round(margin, 6) if margin is not None else None,
+                    "frames": own.get("frames", 0),
+                    "ok": bool(own.get("ok")),
+                })
+
+            available = [item for item in evidence if item["mean_ssim"] is not None]
+            winner = max(available, key=lambda item: item["mean_ssim"]) if available else None
+            classification = self._classify_zone(winner, cfg)
+            zone_payload = {
+                "pct": zone["pct"],
+                "start_sec": zone["start_sec"],
+                "origin": zone["origin"],
+                "state": classification,
+                "winner_delay_ms": winner.get("delay_ms") if winner else None,
+                "winner_ssim": winner.get("mean_ssim") if winner else None,
+                "winner_margin": winner.get("margin") if winner else None,
+                "candidates": evidence,
+                "raw": {str(key): value for key, value in raw_scores.items()},
+            }
+            zone_results.append(zone_payload)
+            self._event(stage, "zone_scored", {
+                key: zone_payload[key]
+                for key in ("pct", "start_sec", "state", "winner_delay_ms", "winner_ssim", "winner_margin")
+            })
+            if classification in {"FUERTE", "VALIDA"}:
+                valid_zones.append(zone_payload)
+            elif zone["origin"] == "initial":
+                self._event(stage, "zone_replaced", {
+                    "pct": zone["pct"],
+                    "state": classification,
+                })
+            if len(valid_zones) >= required:
+                break
+
+        aggregate = self._aggregate_candidates(base_candidates, valid_zones)
+        strong_count = sum(1 for zone in valid_zones if zone["state"] == "FUERTE")
+        winner_delay = aggregate[0]["delay_ms"] if aggregate else None
+        winner_wins = aggregate[0]["wins"] if aggregate else 0
+        runner_wins = aggregate[1]["wins"] if len(aggregate) > 1 else -1
+        unique_winner = bool(
+            winner_delay is not None
+            and len(valid_zones) >= required
+            and winner_wins >= required
+            and winner_wins > runner_wins
+        )
+        strong_winner = bool(unique_winner and strong_count >= required_strong)
+        result = {
+            "ok": True,
+            "method": "ffmpeg_ssim_burst_v1",
+            "stage": stage,
+            "profile": "trailer" if str(profile).lower() == "trailer" else "pelicula",
+            "tempo": round(_finite_float(tempo, 1.0), 9),
+            "candidate_delays_ms": base_candidates,
+            "zones_attempted": len(zone_results),
+            "zones_valid": len(valid_zones),
+            "zones_strong": strong_count,
+            "winner_delay_ms": winner_delay,
+            "unique_winner": unique_winner,
+            "strong_winner": strong_winner,
+            "candidates": aggregate,
+            "zones": zone_results,
+            "ref": ref_meta.as_dict(),
+            "esp_video_original": esp_meta.as_dict(),
+            "duration_sec": round(time.monotonic() - started, 3),
+        }
+        self._event(stage, "finished", {
+            "zones_attempted": result["zones_attempted"],
+            "zones_valid": result["zones_valid"],
+            "zones_strong": result["zones_strong"],
+            "winner_delay_ms": winner_delay,
+            "unique_winner": unique_winner,
+            "strong_winner": strong_winner,
+            "duration_sec": result["duration_sec"],
+        })
+        return result
+
+    @staticmethod
+    def _classify_zone(winner: dict[str, Any] | None, cfg: dict[str, Any]) -> str:
+        if not winner or winner.get("mean_ssim") is None or winner.get("margin") is None:
+            return "INUTIL"
+        score = float(winner["mean_ssim"])
+        margin = float(winner["margin"])
+        if score >= float(cfg["visual_strong_min"]) and margin >= float(cfg["visual_margin_strong"]):
+            return "FUERTE"
+        if score >= float(cfg["visual_valid_min"]) and margin >= float(cfg["visual_margin_valid"]):
+            return "VALIDA"
+        if score >= float(cfg["visual_valid_min"]):
+            return "SOSPECHOSA"
+        return "INUTIL"
+
+    @staticmethod
+    def _aggregate_candidates(base_candidates: list[int], zones: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for candidate in base_candidates:
+            wins = 0
+            scores = []
+            margins = []
+            for zone in zones:
+                item = next((row for row in zone["candidates"] if row["delay_ms"] == candidate), None)
+                if not item or item.get("mean_ssim") is None:
+                    continue
+                scores.append(float(item["mean_ssim"]))
+                if item.get("margin") is not None:
+                    margins.append(float(item["margin"]))
+                if zone.get("winner_delay_ms") == candidate:
+                    wins += 1
+            out.append({
+                "delay_ms": candidate,
+                "wins": wins,
+                "mean_ssim": round(sum(scores) / len(scores), 6) if scores else None,
+                "mean_margin": round(sum(margins) / len(margins), 6) if margins else None,
+                "zones": len(scores),
+            })
+        return sorted(
+            out,
+            key=lambda item: (
+                item["wins"],
+                item["mean_ssim"] if item["mean_ssim"] is not None else -1.0,
+            ),
+            reverse=True,
+        )
+
+    def confirm_fps_plan(
+        self,
+        ref_video: str,
+        esp_video_original: str,
+        ref_fps: float | None = None,
+        esp_fps: float | None = None,
+        profile: str = "pelicula",
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        ref_meta = self.probe_video(ref_video)
+        esp_meta = self.probe_video(esp_video_original)
+        ref_rate = _finite_float(ref_fps, ref_meta.avg_fps)
+        esp_rate = _finite_float(esp_fps, esp_meta.avg_fps)
+        if ref_rate <= 0 or esp_rate <= 0:
+            return _fps_result(False, False, False, "fps_no_detectado", ref_rate, esp_rate, 1.0, started)
+        if abs(round(ref_rate, 3) - round(esp_rate, 3)) <= 0.0005:
+            return _fps_result(False, False, False, "fps_iguales", ref_rate, esp_rate, 1.0, started)
+
+        tempo = ref_rate / esp_rate
+        expected_ref_duration = esp_meta.duration / tempo
+        duration_delta = abs(expected_ref_duration - ref_meta.duration)
+        if str(profile).lower() == "trailer":
+            tolerance = max(0.35, ref_meta.duration * 0.005)
+        else:
+            tolerance = max(1.5, ref_meta.duration * 0.0015)
+        duration_match = duration_delta <= tolerance
+        cfg = self.config(profile)
+        zones = pick_zones(ref_meta.duration, profile, cfg)[:3]
+        comparisons = []
+        planned_wins = 0
+        useful = 0
+        for zone in zones:
+            planned = self.score_candidate(
+                ref_video,
+                esp_video_original,
+                zone["start_sec"],
+                0,
+                tempo,
+                profile,
+                ref_meta.duration,
+                esp_meta.duration,
+            )
+            nominal = self.score_candidate(
+                ref_video,
+                esp_video_original,
+                zone["start_sec"],
+                0,
+                1.0,
+                profile,
+                ref_meta.duration,
+                esp_meta.duration,
+            )
+            planned_score = planned.get("mean_ssim") if planned.get("ok") else None
+            nominal_score = nominal.get("mean_ssim") if nominal.get("ok") else None
+            delta = None
+            if planned_score is not None and nominal_score is not None:
+                useful += 1
+                delta = float(planned_score) - float(nominal_score)
+                if planned_score >= float(cfg["visual_valid_min"]) and delta >= 0.02:
+                    planned_wins += 1
+            comparisons.append({
+                "pct": zone["pct"],
+                "start_sec": zone["start_sec"],
+                "planned_ssim": planned_score,
+                "nominal_ssim": nominal_score,
+                "delta": round(delta, 6) if delta is not None else None,
+            })
+
+        visual_match = useful >= 2 and planned_wins >= 2
+        vfr = ref_meta.variable_frame_rate or esp_meta.variable_frame_rate
+        confirmed = bool(duration_match and visual_match and not vfr)
+        if vfr:
+            reason = "vfr_no_confirmado"
+        elif not duration_match:
+            reason = "duracion_no_confirma_tempo"
+        elif not visual_match:
+            reason = "imagen_no_confirma_tempo"
+        else:
+            reason = "duration_ratio_and_visual_match"
+        return {
+            "planned": True,
+            "enabled": True,
+            "confirmed": confirmed,
+            "applied": False,
+            "reason": reason,
+            "ref_fps": round(ref_rate, 9),
+            "esp_fps": round(esp_rate, 9),
+            "tempo": round(tempo, 12),
+            "duration": {
+                "ref": round(ref_meta.duration, 6),
+                "esp": round(esp_meta.duration, 6),
+                "expected_ref": round(expected_ref_duration, 6),
+                "delta": round(duration_delta, 6),
+                "tolerance": round(tolerance, 6),
+                "match": duration_match,
+            },
+            "visual": {
+                "useful_zones": useful,
+                "planned_wins": planned_wins,
+                "match": visual_match,
+                "comparisons": comparisons,
+            },
+            "variable_frame_rate": vfr,
+            "duration_sec": round(time.monotonic() - started, 3),
+        }
+
+
+def _parse_rate(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text or text == "0/0":
+        return 0.0
+    try:
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            divisor = float(denominator)
+            return float(numerator) / divisor if divisor else 0.0
+        return float(text)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _parse_duration(value: Any) -> float:
+    text = str(value or "").strip().replace(",", ".")
+    if not text:
+        return 0.0
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    match = re.match(r"^(\d+):([0-5]?\d):([0-5]?\d(?:\.\d+)?)$", text)
+    if not match:
+        return 0.0
+    return int(match.group(1)) * 3600.0 + int(match.group(2)) * 60.0 + float(match.group(3))
+
+
+def _unique_ints(values: Iterable[int | float]) -> list[int]:
+    out = []
+    seen = set()
+    for value in values:
+        number = int(round(_finite_float(value)))
+        if number in seen:
+            continue
+        seen.add(number)
+        out.append(number)
+    return out
+
+
+def _fps_result(
+    planned: bool,
+    enabled: bool,
+    confirmed: bool,
+    reason: str,
+    ref_fps: float,
+    esp_fps: float,
+    tempo: float,
+    started: float,
+) -> dict[str, Any]:
+    return {
+        "planned": planned,
+        "enabled": enabled,
+        "confirmed": confirmed,
+        "applied": False,
+        "reason": reason,
+        "ref_fps": round(ref_fps, 9),
+        "esp_fps": round(esp_fps, 9),
+        "tempo": round(tempo, 12),
+        "duration_sec": round(time.monotonic() - started, 3),
+    }
+
+
+def _json_print(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Verificación visual SSIM para Delay Audio")
+    parser.add_argument("action", choices=("score", "confirm-fps"))
+    parser.add_argument("--ref", required=True)
+    parser.add_argument("--esp-video-original", required=True)
+    parser.add_argument("--profile", choices=("pelicula", "trailer"), default="pelicula")
+    parser.add_argument("--candidate-ms", action="append", default=[])
+    parser.add_argument("--tempo", type=float, default=1.0)
+    parser.add_argument("--fps-ref", type=float)
+    parser.add_argument("--fps-esp", type=float)
+    args = parser.parse_args()
+    verifier = VisualVerifier()
+    try:
+        if args.action == "confirm-fps":
+            payload = verifier.confirm_fps_plan(
+                args.ref,
+                args.esp_video_original,
+                args.fps_ref,
+                args.fps_esp,
+                args.profile,
+            )
+        else:
+            candidates = [int(round(float(value))) for value in args.candidate_ms] or [0]
+            payload = verifier.score_candidates(
+                args.ref,
+                args.esp_video_original,
+                candidates,
+                args.profile,
+                args.tempo,
+            )
+        _json_print(payload)
+        return 0 if payload.get("ok", True) else 1
+    except Exception as exc:
+        _json_print({"ok": False, "state": "ERROR_TECNICO", "error": str(exc)})
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
