@@ -13,9 +13,17 @@ Responde siempre en espanol y empieza por `Pim Pam`.
 - Puerto: `9004`
 - URL: `http://192.168.1.159:9004/`
 
-La web contiene dos areas: Delay Audio y Seguimiento. Trabaja solo sobre el area solicitada.
+La web contiene dos áreas: Delay Audio y Seguimiento. Trabaja solo sobre el área solicitada.
 
 Antes de tocar `Taller`, lee `docs/taller-delay-audio.md`. Si cambias su comportamiento, actualiza ese documento en el mismo cambio.
+
+## Documentación
+
+La carpeta `docs/` contiene únicamente documentación vigente sobre el funcionamiento actual del proyecto.
+
+No crear líneas base, investigaciones, informes temporales, historiales, resúmenes de cambios ni archivos Markdown adicionales dentro de `docs/` salvo petición expresa del usuario.
+
+Cuando cambie el funcionamiento, actualizar el documento vigente correspondiente en lugar de crear otro nuevo.
 
 ## Limites
 
