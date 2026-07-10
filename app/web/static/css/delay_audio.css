@@ -2383,9 +2383,10 @@ button.watch-chevron {
   border-color: rgba(116, 199, 255, .34);
   background: rgba(16, 43, 66, .88);
   color: #dff4ff;
-  display: grid;
-  gap: 1px;
-  line-height: 1.05;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 
 .workshop-edit.is-help-red {
