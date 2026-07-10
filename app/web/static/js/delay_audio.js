@@ -84,6 +84,9 @@ const completeMoviesPath = delayAudioConfig.completeMoviesPath || "/data/downloa
 const hospitalPath = delayAudioConfig.hospitalPath || `${mediaRootPath}/Hospital`;
 let workshopBusy = false;
 let workshopTimer = null;
+let workshopPollGeneration = 0;
+let workshopPollRequestId = 0;
+let workshopPollInFlight = 0;
 let trailerJobTimer = null;
 let workshopOutputModalOpen = false;
 let workshopSettingsLoaded = false;
@@ -644,6 +647,16 @@ function workshopDelayHintMs(state = readWorkshopState()) {
   return normalizeWorkshopDelayHintMs(state.delayHintMs || 0);
 }
 
+function workshopJobRunning(state = readWorkshopState()) {
+  return state?.status === "running" || workshopBusy;
+}
+
+function blockWorkshopMutationWhileRunning(state = readWorkshopState()) {
+  if (!workshopJobRunning(state)) return false;
+  statusText.textContent = "Espera a que termine Taller";
+  return true;
+}
+
 function formatWorkshopDelayHint(ms) {
   const value = normalizeWorkshopDelayHintMs(ms);
   const sign = value > 0 ? "+" : "";
@@ -657,6 +670,7 @@ function clearWorkshopResultFields(state) {
   state.progress = null;
   state.error = "";
   delete state.job;
+  delete state.requested_mode;
   delete state.soundJob;
   state.soundDone = false;
 }
@@ -706,6 +720,7 @@ function workshopSaveText() {
 
 function updateWorkshopSettings(values, saveNow = false, renderUi = true) {
   const state = readWorkshopState();
+  if (blockWorkshopMutationWhileRunning(state)) return;
   state.settings = {
     ...workshopSettings(state),
     ...values,
@@ -947,12 +962,12 @@ function renderWorkshopDelayHint(state) {
     <div class="workshop-delay-hint">
       <span>Ayuda visual</span>
       <strong>${escapeHtml(formatWorkshopDelayHint(delayHintMs))}</strong>
-      <button type="button" data-workshop-preview-reset-main>0</button>
+      <button type="button" data-workshop-preview-reset-main ${workshopJobRunning(state) ? "disabled" : ""}>0</button>
     </div>
   `;
 }
 
-function renderWorkshopSettings(settings) {
+function renderWorkshopSettings(settings, locked = false) {
   const modo = settings.modo === "medir" ? "medir" : "exportar";
   const perfil = settings.perfil === "trailer" ? "trailer" : "pelicula";
   return `
@@ -967,27 +982,27 @@ function renderWorkshopSettings(settings) {
         <div class="workshop-setting">
           <label>Modo</label>
           <div class="workshop-segment">
-            <button class="${modo === "exportar" ? "is-active" : ""}" type="button" data-workshop-setting="modo" data-workshop-value="exportar">Medir y exportar</button>
-            <button class="${modo === "medir" ? "is-active" : ""}" type="button" data-workshop-setting="modo" data-workshop-value="medir">Solo medir</button>
+            <button class="${modo === "exportar" ? "is-active" : ""}" type="button" data-workshop-setting="modo" data-workshop-value="exportar" ${locked ? "disabled" : ""}>Medir y exportar</button>
+            <button class="${modo === "medir" ? "is-active" : ""}" type="button" data-workshop-setting="modo" data-workshop-value="medir" ${locked ? "disabled" : ""}>Solo medir</button>
           </div>
         </div>
         <div class="workshop-setting">
           <label>Tipo</label>
           <div class="workshop-segment">
-            <button class="${perfil === "pelicula" ? "is-active" : ""}" type="button" data-workshop-setting="perfil" data-workshop-value="pelicula">Película</button>
-            <button class="${perfil === "trailer" ? "is-active" : ""}" type="button" data-workshop-setting="perfil" data-workshop-value="trailer">Tráiler</button>
+            <button class="${perfil === "pelicula" ? "is-active" : ""}" type="button" data-workshop-setting="perfil" data-workshop-value="pelicula" ${locked ? "disabled" : ""}>Película</button>
+            <button class="${perfil === "trailer" ? "is-active" : ""}" type="button" data-workshop-setting="perfil" data-workshop-value="trailer" ${locked ? "disabled" : ""}>Tráiler</button>
           </div>
         </div>
         <div class="workshop-setting">
           <label>Sub Video Bueno</label>
-          <input class="workshop-input" type="text" value="${escapeHtml(settings.sub_video_bueno || "")}" data-workshop-input="sub_video_bueno" autocomplete="off">
+          <input class="workshop-input" type="text" value="${escapeHtml(settings.sub_video_bueno || "")}" data-workshop-input="sub_video_bueno" autocomplete="off" ${locked ? "disabled" : ""}>
         </div>
         <div class="workshop-setting">
           <label>Sub Audio Español</label>
-          <input class="workshop-input" type="text" value="${escapeHtml(settings.sub_fuente_espanol || "")}" data-workshop-input="sub_fuente_espanol" autocomplete="off">
+          <input class="workshop-input" type="text" value="${escapeHtml(settings.sub_fuente_espanol || "")}" data-workshop-input="sub_fuente_espanol" autocomplete="off" ${locked ? "disabled" : ""}>
         </div>
       </div>
-      <button class="workshop-output" type="button" data-workshop-output-open>
+      <button class="workshop-output" type="button" data-workshop-output-open ${locked ? "disabled" : ""}>
         <span>Carpeta salida</span>
         <strong>${escapeHtml(outputPresetLabel(settings.carpeta_salida))}</strong>
       </button>
@@ -998,7 +1013,7 @@ function renderWorkshopSettings(settings) {
 function renderWorkshopPreviewModal(state) {
   if (!workshopPreviewModalOpen) return "";
   const ready = Boolean(state.ref?.path && state.esp?.path);
-  const canAccept = ready && !workshopPreviewLoading && !workshopPreviewError && workshopPreviewData?.ref_url && workshopPreviewData?.esp_url;
+  const canAccept = ready && !workshopJobRunning(state) && !workshopPreviewLoading && !workshopPreviewError && workshopPreviewData?.ref_url && workshopPreviewData?.esp_url;
   const valueText = formatWorkshopDelayHint(workshopPreviewHintMs);
   return `
     <div class="workshop-preview-modal is-open">
@@ -1157,6 +1172,128 @@ function hybridWorkshopResultInfo(result) {
   };
 }
 
+function workshopHybridReason(result, fallback = "") {
+  const reason = String(result?.decision?.reason || "").trim();
+  const labels = {
+    fast_path_visual_y_audio_coinciden: "Imagen y audio confirman el mismo delay.",
+    descubrimiento_audio_y_visual_coinciden: "El descubrimiento de audio y la imagen confirman el mismo delay.",
+    ningun_delay_fijo_explica_las_zonas: "Ningún delay fijo explica todas las zonas analizadas.",
+    imagen_alinea_pero_audio_no_sostiene_el_mismo_origen: "La imagen alinea, pero el audio no confirma el mismo origen.",
+    sin_zonas_utiles_en_audio_o_imagen: "No hay zonas útiles suficientes en audio o imagen.",
+    descubrimiento_sin_evidencia_suficiente: "El descubrimiento no reúne evidencia suficiente.",
+    fps_no_confirmados: "No se ha podido confirmar una corrección FPS segura.",
+    vfr_no_confirmado: "El vídeo usa una cadencia variable que no se ha podido confirmar.",
+    duracion_no_confirma_tempo: "La duración no confirma el cambio de velocidad previsto.",
+    imagen_no_confirma_tempo: "La imagen no confirma el cambio de velocidad previsto.",
+    duration_ratio_and_visual_match: "Duración e imagen confirman la corrección FPS.",
+    evidencia_insuficiente_para_autorizar: "La evidencia no permite autorizar el resultado.",
+    resultado_legacy_sin_verificacion_hibrida: "El resultado anterior no tiene verificación híbrida.",
+    estado_hibrido_desconocido: "El motor devolvió un estado no reconocido.",
+    contrato_resultado_invalido: "El resultado del motor está incompleto o no cumple el contrato.",
+    motor_medicion_fallido: "El motor de medición no pudo completar el análisis.",
+    error_tecnico_job: "El trabajo terminó por un error técnico.",
+    cleanup_failed: "No se pudieron limpiar todos los temporales del trabajo.",
+    fps_no_detectado: "No se pudieron detectar FPS válidos en ambos vídeos.",
+    tempo_no_valido: "La relación de velocidad entre ambos vídeos no es válida.",
+    fps_no_confirmado: "La diferencia FPS no quedó confirmada con seguridad."
+  };
+  if (labels[reason]) return labels[reason];
+  if (!reason) return fallback || "El motor no ha indicado un motivo adicional.";
+  const readable = reason.replace(/_/g, " ").trim();
+  return readable ? `${readable.charAt(0).toUpperCase()}${readable.slice(1)}.` : fallback;
+}
+
+function workshopHybridFpsInfo(result) {
+  const fps = result?.fps_correction || {};
+  const reason = String(fps.reason || "");
+  const refFps = normalizeWorkshopFps(fps.ref_fps).replace(/\.0+$/, "");
+  const espFps = normalizeWorkshopFps(fps.esp_fps).replace(/\.0+$/, "");
+  const pair = fps.planned === true && refFps && espFps ? ` · ${espFps} → ${refFps}` : "";
+
+  if (fps.planned !== true) {
+    if (reason && reason !== "fps_iguales") {
+      return { text: "Rechazada", className: "is-error" };
+    }
+    return { text: "No necesaria", className: "is-neutral" };
+  }
+  if (fps.confirmed !== true) return { text: `Rechazada${pair}`, className: "is-error" };
+  if (fps.applied === true) return { text: `Aplicada${pair}`, className: "is-ok" };
+  return { text: `Confirmada${pair}`, className: "is-ok" };
+}
+
+function workshopHybridRequestedMode(state, result) {
+  const values = [result?.requested_mode, state?.requested_mode];
+  return values.find((value) => value === "medir" || value === "exportar") || "";
+}
+
+function workshopHybridExportInfo(state, result) {
+  const exportData = result?.export || {};
+  const status = String(exportData.status || "");
+  const requestedMode = workshopHybridRequestedMode(state, result);
+  if (status === "done") return { text: "Realizada", className: "is-ok", path: exportData.path || "" };
+  if (status === "running") return { text: "En curso", className: "is-neutral", path: exportData.path || "" };
+  if (status === "error") return { text: "Error", className: "is-error", path: exportData.path || "" };
+  if (requestedMode === "medir") return { text: "No solicitada", className: "is-neutral", path: "" };
+  if (state?.status === "running" && result?.state === "OK_VERIFICADO" && result?.export_allowed === true) {
+    return { text: "En curso", className: "is-neutral", path: "" };
+  }
+  return { text: "Bloqueada", className: "is-warn", path: "" };
+}
+
+function workshopHybridZoneText(value, singular, plural) {
+  const count = Math.max(0, Number(value) || 0);
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function renderWorkshopHybridEvidence(state, result, hybridInfo) {
+  const visual = result?.visual || {};
+  const audio = result?.audio || {};
+  const visualVerified = visual.verified === true;
+  const visualZones = visual.zones_valid ?? 0;
+  const audioZones = audio.supporting_zones ?? result?.zones_count ?? 0;
+  const fpsInfo = workshopHybridFpsInfo(result);
+  const exportInfo = workshopHybridExportInfo(state, result);
+  const stateClass = hybridInfo.verified ? "is-ok" : hybridInfo.technical ? "is-error" : "is-warn";
+  const reason = workshopHybridReason(result, hybridInfo.message);
+  const delayUnavailable = String(result?.state || "") !== "OK_VERIFICADO";
+  const finalDelay = delayUnavailable ? "--" : cleanWorkshopDelay(result?.delay_ms);
+
+  return `
+    <div class="workshop-evidence">
+      <div class="workshop-evidence-item ${hybridInfo.verified ? "is-ok" : "is-warn"}">
+        <span>Delay final</span>
+        <strong>${escapeHtml(finalDelay)}</strong>
+      </div>
+      <div class="workshop-evidence-item ${stateClass}">
+        <span>Estado</span>
+        <strong>${escapeHtml(hybridInfo.title)}</strong>
+      </div>
+      <div class="workshop-evidence-item ${visualVerified ? "is-ok" : "is-warn"}">
+        <span>Imagen</span>
+        <strong>${escapeHtml(visualVerified ? "Verificada" : "No verificada")}</strong>
+        <small>${escapeHtml(workshopHybridZoneText(visualZones, "zona válida", "zonas válidas"))}</small>
+      </div>
+      <div class="workshop-evidence-item ${hybridInfo.verified ? "is-ok" : "is-warn"}">
+        <span>Audio</span>
+        <strong>${escapeHtml(workshopHybridZoneText(audioZones, "zona coherente", "zonas coherentes"))}</strong>
+      </div>
+      <div class="workshop-evidence-item ${fpsInfo.className}">
+        <span>FPS</span>
+        <strong>${escapeHtml(fpsInfo.text)}</strong>
+      </div>
+      <div class="workshop-evidence-item ${exportInfo.className}">
+        <span>Exportación</span>
+        <strong>${escapeHtml(exportInfo.text)}</strong>
+      </div>
+      <div class="workshop-evidence-item workshop-evidence-reason ${stateClass}">
+        <span>Motivo</span>
+        <strong>${escapeHtml(reason)}</strong>
+      </div>
+    </div>
+    ${exportInfo.path && exportInfo.text === "Realizada" ? `<p class="workshop-ok">Exportado: ${escapeHtml(exportInfo.path)}</p>` : ""}
+  `;
+}
+
 function workshopProgressInfo(state) {
   const progress = state.progress || null;
   const result = state.result || null;
@@ -1302,7 +1439,7 @@ function renderWorkshopResult(state) {
   const result = state.result || null;
   const hybridInfo = hybridWorkshopResultInfo(result);
   const rows = Array.isArray(state.rows) ? state.rows : [];
-  if (state.status === "running") {
+  if (state.status === "running" && !hybridInfo) {
     return `
       <section class="workshop-result is-running">
         <div class="workshop-kicker">Resultado</div>
@@ -1312,33 +1449,12 @@ function renderWorkshopResult(state) {
       </section>
     `;
   }
-  if (hybridInfo?.verified) {
-    const exportData = result.export || null;
-    const zonesCount = result.audio?.supporting_zones ?? result.zones_count ?? 0;
-    return `
-      <section class="workshop-result">
-        <div class="workshop-kicker">Resultado</div>
-        <h2>${escapeHtml(hybridInfo.title)}</h2>
-        <div class="workshop-final">
-          <strong>${escapeHtml(result.delay_ms)} ms</strong>
-          <span>${escapeHtml(result.confidence || "")}</span>
-        </div>
-        <p>${escapeHtml(zonesCount)} zonas de audio confirmadas</p>
-        ${exportData?.status === "done" ? `<p class="workshop-ok">Exportado: ${escapeHtml(exportData.path || "")}</p>` : ""}
-        ${exportData?.status === "running" ? `<p>Exportando vídeo final...</p>` : ""}
-        ${exportData?.status === "skipped" ? `<p>No exportado.</p>` : ""}
-        ${exportData?.status === "error" ? `<p class="workshop-error">Exportación fallida.</p>` : ""}
-        ${renderWorkshopRows(rows)}
-      </section>
-    `;
-  }
   if (hybridInfo) {
     return `
       <section class="workshop-result">
         <div class="workshop-kicker">Resultado</div>
-        <h2>${escapeHtml(hybridInfo.title)}</h2>
-        <p class="workshop-error">${escapeHtml(hybridInfo.message)}</p>
-        <p>No se ha autorizado ninguna exportación.</p>
+        <h2>Resultado híbrido</h2>
+        ${renderWorkshopHybridEvidence(state, result, hybridInfo)}
         ${renderWorkshopRows(rows)}
       </section>
     `;
@@ -1408,9 +1524,9 @@ function renderWorkshop() {
       ${renderWorkshopSlot("esp", state.esp, alerts)}
       ${renderWorkshopDelayHint(state)}
       <div class="workshop-actions">
-        <button class="workshop-run${escapeHtml(action.className)}" type="button" data-workshop-run ${!workshopReady(state) || workshopBusy ? "disabled" : ""}>${escapeHtml(action.text)}</button>
+        <button class="workshop-run${escapeHtml(action.className)}" type="button" data-workshop-run ${!workshopReady(state) || workshopJobRunning(state) ? "disabled" : ""}>${escapeHtml(action.text)}</button>
       </div>
-      ${renderWorkshopSettings(settings)}
+      ${renderWorkshopSettings(settings, workshopJobRunning(state))}
       ${renderWorkshopResult(state)}
       ${renderWorkshopPreviewModal(state)}
       ${renderWorkshopOutputModal(settings)}
@@ -3229,6 +3345,7 @@ function buildSelectedItemParams(version) {
 
 async function selectWorkshopVideo(kind) {
   if (!actionModalItem || actionModalItem.kind !== "video" || itemActionBusy) return;
+  if (blockWorkshopMutationWhileRunning()) return;
   itemActionBusy = true;
   itemActionError = "";
   renderActionModal();
@@ -3238,6 +3355,11 @@ async function selectWorkshopVideo(kind) {
     if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
 
     const state = readWorkshopState();
+    if (blockWorkshopMutationWhileRunning(state)) {
+      itemActionBusy = false;
+      renderActionModal();
+      return;
+    }
     const key = workshopSlotKey(kind);
     const streams = Array.isArray(data.streams) ? data.streams : [];
     const streamsReady = Boolean(data.streams_ok);
@@ -3331,13 +3453,21 @@ function setWorkshopTrack(kind, value) {
   const state = readWorkshopState();
   const key = workshopSlotKey(kind);
   if (!state[key]) return;
-  state[key].audio = String(value);
+  if (state.status === "running" || workshopBusy) {
+    statusText.textContent = "Espera a que termine Taller para cambiar la pista";
+    return;
+  }
+  const nextValue = String(value);
+  if (String(state[key].audio ?? "") === nextValue) return;
+  state[key].audio = nextValue;
+  clearWorkshopResultFields(state);
   saveWorkshopState(state);
   render(lastData);
 }
 
 function clearWorkshopSlot(kind) {
   const state = readWorkshopState();
+  if (blockWorkshopMutationWhileRunning(state)) return;
   delete state[workshopSlotKey(kind)];
   state.delayHintMs = 0;
   clearWorkshopResultFields(state);
@@ -3346,6 +3476,7 @@ function clearWorkshopSlot(kind) {
 }
 
 function clearWorkshop() {
+  if (blockWorkshopMutationWhileRunning()) return;
   stopWorkshopPolling();
   workshopBusy = false;
   saveWorkshopState({});
@@ -3540,6 +3671,7 @@ function acceptWorkshopPreviewHint() {
   if (!workshopPreviewData) return;
   pauseWorkshopPreviewVideos();
   const state = readWorkshopState();
+  if (blockWorkshopMutationWhileRunning(state)) return;
   state.delayHintMs = normalizeWorkshopDelayHintMs(workshopPreviewHintMs, Number(workshopPreviewData.max_offset_ms || 60000));
   clearWorkshopResultFields(state);
   saveWorkshopState(state);
@@ -3550,6 +3682,7 @@ function acceptWorkshopPreviewHint() {
 
 function resetWorkshopDelayHintMain() {
   const state = readWorkshopState();
+  if (blockWorkshopMutationWhileRunning(state)) return;
   state.delayHintMs = 0;
   clearWorkshopResultFields(state);
   saveWorkshopState(state);
@@ -3641,20 +3774,27 @@ function bindWorkshop() {
 async function runWorkshop() {
   if (workshopBusy) return;
   const state = readWorkshopState();
+  if (blockWorkshopMutationWhileRunning(state)) return;
   if (!workshopReady(state)) {
     statusText.textContent = "Faltan videos o pistas";
     return;
   }
   const needsFpsCorrection = workshopMetaAlerts(state).fpsMismatch;
+  const requestedMode = workshopSettings(state).modo === "medir" ? "medir" : "exportar";
 
+  stopWorkshopPolling();
   workshopBusy = true;
   prepareFinishSound();
+  delete state.job;
+  delete state.soundJob;
+  state.soundDone = false;
   state.status = "running";
   state.result = null;
   state.rows = [];
   state.progress = needsFpsCorrection
     ? { phase: "fps", percent: 0, label: "FPS" }
     : { phase: "starting", percent: 0, label: "Inicio" };
+  state.requested_mode = requestedMode;
   state.error = "";
   saveWorkshopState(state);
   render(lastData);
@@ -3682,6 +3822,9 @@ async function runWorkshop() {
     nextState.status = "running";
     nextState.result = null;
     nextState.rows = [];
+    nextState.requested_mode = data.requested_mode === "medir" || data.requested_mode === "exportar"
+      ? data.requested_mode
+      : requestedMode;
     nextState.progress = needsFpsCorrection
       ? { phase: "fps", percent: 0, label: "FPS" }
       : { phase: "measure", percent: 0, label: "Midiendo" };
@@ -3706,36 +3849,53 @@ async function runWorkshop() {
 
 function startWorkshopPolling() {
   if (!workshopTimer) {
-    workshopTimer = setInterval(pollWorkshopJob, 2500);
+    const state = readWorkshopState();
+    const generation = ++workshopPollGeneration;
+    const jobId = state.job || "";
+    workshopTimer = setInterval(() => pollWorkshopJob(generation, jobId), 2500);
+    pollWorkshopJob(generation, jobId);
   }
-  pollWorkshopJob();
 }
 
 function stopWorkshopPolling() {
+  workshopPollGeneration += 1;
   if (workshopTimer) {
     clearInterval(workshopTimer);
     workshopTimer = null;
   }
 }
 
-async function pollWorkshopJob() {
+async function pollWorkshopJob(generation = workshopPollGeneration, expectedJob = "") {
+  if (generation !== workshopPollGeneration || workshopPollInFlight) return;
   const state = readWorkshopState();
   if (!state.job) {
     stopWorkshopPolling();
     return;
   }
+  const jobId = String(expectedJob || state.job);
+  if (String(state.job) !== jobId) return;
+  const requestId = ++workshopPollRequestId;
+  workshopPollInFlight = requestId;
 
   try {
-    const response = await fetch(`/api?v=delay_audio_status&da=status&job=${encodeURIComponent(state.job)}&t=${Date.now()}`, { cache: "no-store" });
+    const response = await fetch(`/api?v=delay_audio_status&da=status&job=${encodeURIComponent(jobId)}&t=${Date.now()}`, { cache: "no-store" });
     const data = await response.json();
-    if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
+    if (!response.ok || data.ok === false) {
+      const error = new Error(data.error || `HTTP ${response.status}`);
+      error.workshopJobMissing = data.ok === false && /no encuentro ese trabajo/i.test(String(data.error || ""));
+      throw error;
+    }
 
     const nextState = readWorkshopState();
+    if (generation !== workshopPollGeneration || String(nextState.job || "") !== jobId) return;
     nextState.job = data.job || nextState.job;
     nextState.status = data.status || "";
     nextState.rows = Array.isArray(data.rows) ? data.rows : [];
     nextState.result = data.result || null;
     nextState.progress = data.progress || null;
+    if (data.requested_mode === "medir" || data.requested_mode === "exportar") {
+      nextState.requested_mode = data.requested_mode;
+    }
     nextState.log = data.log || "";
     nextState.error = data.error || "";
     saveWorkshopState(nextState);
@@ -3756,10 +3916,22 @@ async function pollWorkshopJob() {
     if (activeTab === "taller") render(lastData);
   } catch (error) {
     const nextState = readWorkshopState();
-    nextState.error = "No se pudo leer el estado";
+    if (generation !== workshopPollGeneration || String(nextState.job || "") !== jobId) return;
+    if (error.workshopJobMissing) {
+      nextState.status = "error";
+      nextState.error = "El trabajo ya no está disponible";
+      nextState.result = { ok: false, error: nextState.error };
+      nextState.progress = { phase: "error", percent: 100, label: "Aviso" };
+      stopWorkshopPolling();
+      statusText.textContent = "El trabajo de Taller ya no está disponible";
+    } else {
+      nextState.error = "No se pudo leer el estado";
+    }
     saveWorkshopState(nextState);
     renderHeaderWorkshop();
     if (activeTab === "taller") render(lastData);
+  } finally {
+    if (workshopPollInFlight === requestId) workshopPollInFlight = 0;
   }
 }
 

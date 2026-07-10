@@ -8,6 +8,7 @@ import unittest
 import uuid
 import wave
 from array import array
+from unittest.mock import Mock
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -254,9 +255,13 @@ class FastAudioZoneTests(unittest.TestCase):
         fake_dir = os.path.join(runtime_root, f"phase4-cleanup-{uuid.uuid4().hex}")
         with open(fake_dir, "w", encoding="utf-8") as handle:
             handle.write("not-a-directory")
+        motor = DelayAudio.__new__(DelayAudio)
+        motor.diag = Mock()
         try:
             with self.assertRaises(RuntimeError):
-                DelayAudio.remove_work_dir_checked(fake_dir)
+                motor.remove_work_dir_checked(fake_dir)
+            motor.diag.event.assert_called_once()
+            self.assertEqual(motor.diag.event.call_args.args[0:2], ("cleanup", "failed"))
         finally:
             if os.path.exists(fake_dir):
                 os.remove(fake_dir)

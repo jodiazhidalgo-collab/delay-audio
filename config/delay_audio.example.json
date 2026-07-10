@@ -6,6 +6,89 @@
   "sub_video_bueno": "INGLES",
   "sub_fuente_espanol": "ESPANOL delay audio",
   "hybrid": {
-    "enabled": false
+    "enabled": false,
+    "visual_method": "ffmpeg_ssim_burst_v1",
+    "movie": {
+      "visual": {
+        "zone_pcts": [18, 50, 82],
+        "fallback_zone_pcts": [10, 30, 70, 90, 40, 60],
+        "burst_sec": 2.0,
+        "fps": 2.0,
+        "width": 192,
+        "height": 108,
+        "crop_safe_pct": 90,
+        "strong_min": 0.88,
+        "valid_min": 0.8,
+        "margin_strong": 0.08,
+        "margin_valid": 0.05,
+        "required_zones": 3,
+        "required_strong": 2,
+        "max_zones": 7,
+        "competitor_ms": 400
+      },
+      "audio_narrow": {
+        "zone_pcts": [30, 70],
+        "segment_cap_sec": 25.0,
+        "radius_ms": 2000,
+        "hint_radius_ms": 6000,
+        "tolerance_ms": 180,
+        "score_min": 0.3,
+        "avg_score_min": 0.38,
+        "strong_score_min": 0.48
+      },
+      "audio_discovery": {
+        "initial_zone_pcts": [12, 37, 63, 88],
+        "extra_zone_pcts": [22, 50, 78, 95],
+        "segment_cap_sec": 40.0,
+        "max_delay_ms": 45000,
+        "tolerance_ms": 160,
+        "score_min": 0.18,
+        "support_avg_min": 0.38,
+        "support_strong_min": 0.48,
+        "max_audio_zones": 8,
+        "max_visual_candidates": 4
+      }
+    },
+    "trailer": {
+      "visual": {
+        "zone_pcts": [22, 58, 82],
+        "fallback_zone_pcts": [35, 75, 15, 88],
+        "burst_sec": 1.5,
+        "fps": 2.0,
+        "width": 160,
+        "height": 90,
+        "crop_safe_pct": 90,
+        "strong_min": 0.88,
+        "valid_min": 0.8,
+        "margin_strong": 0.08,
+        "margin_valid": 0.05,
+        "required_zones": 2,
+        "required_strong": 1,
+        "max_zones": 4,
+        "competitor_ms": 400
+      },
+      "audio_narrow": {
+        "zone_pcts": [35, 70],
+        "segment_cap_sec": 8.0,
+        "radius_ms": 1500,
+        "hint_radius_ms": 4000,
+        "tolerance_ms": 140,
+        "score_min": 0.3,
+        "avg_score_min": 0.38,
+        "strong_score_min": 0.48
+      },
+      "audio_discovery": {
+        "initial_zone_pcts": [20, 50, 80],
+        "extra_zone_pcts": [35, 65, 90],
+        "segment_cap_sec": 12.0,
+        "max_delay_ms": 12000,
+        "tolerance_ms": 120,
+        "score_min": 0.18,
+        "support_avg_min": 0.38,
+        "support_strong_min": 0.48,
+        "max_audio_zones": 6,
+        "max_visual_candidates": 4
+      }
+    }
   }
 }

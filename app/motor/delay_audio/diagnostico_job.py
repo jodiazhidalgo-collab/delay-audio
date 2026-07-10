@@ -32,6 +32,21 @@ def _write_json(path, data):
     os.replace(tmp_path, path)
 
 
+def _result_summary(result):
+    if not isinstance(result, dict):
+        return {}
+    export = result.get("export") if isinstance(result.get("export"), dict) else {}
+    return {
+        "ok": result.get("ok"),
+        "state": result.get("state"),
+        "delay_ms": result.get("delay_ms"),
+        "confidence": result.get("confidence"),
+        "export_allowed": result.get("export_allowed"),
+        "export_status": export.get("status"),
+        "profile": result.get("profile"),
+    }
+
+
 class JobDiagnostics:
     def __init__(self, job_dir, job_id=None, kind="delay_audio"):
         self.job_dir = os.path.abspath(job_dir)
@@ -143,8 +158,15 @@ class JobDiagnostics:
         return payload
 
     def finish(self, status, result=None):
-        self.update_job(status=status, finished_at=_now_iso(), result=result or {})
-        self.event("finished", status, f"Job finalizado: {status}", result or {}, "info" if status == "done" else "error")
+        measurement_status = "error" if status == "error" else "measurement_done"
+        self.update_job(status=measurement_status, measurement_finished_at=_now_iso(), result=result or {})
+        self.event(
+            "measurement",
+            "finished",
+            f"Motor finalizado: {status}",
+            _result_summary(result),
+            "info" if status in {"done", "measure_done", "measurement_done"} else "error",
+        )
         self.write_readme()
 
     def rebuild_timeline(self):
@@ -242,6 +264,8 @@ class JobDiagnostics:
 
 def classify_error(message):
     text = str(message or "").lower()
+    if "temporal" in text and any(word in text for word in ("eliminar", "limpiar", "sigue existiendo")):
+        return "CLEANUP_FAILED"
     if "no encuentro" in text or "not found" in text or "no existe" in text:
         return "INPUT_NOT_FOUND"
     if "ffprobe" in text:

@@ -2782,6 +2782,74 @@ button.watch-chevron {
   font-weight: 900;
 }
 
+.workshop-evidence {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.workshop-evidence-item {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  border: 1px solid rgba(145, 160, 177, .18);
+  border-radius: 8px;
+  background: rgba(13, 23, 36, .74);
+  padding: 8px 9px;
+}
+
+.workshop-evidence-item span {
+  color: #9fb2c8;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.workshop-evidence-item strong {
+  min-width: 0;
+  color: #edf5fc;
+  font-size: 12px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.workshop-evidence-item small {
+  color: #aebfd0;
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.workshop-evidence-item.is-ok {
+  border-color: rgba(94, 230, 168, .32);
+  background: rgba(25, 74, 57, .28);
+}
+
+.workshop-evidence-item.is-warn {
+  border-color: rgba(255, 207, 112, .32);
+  background: rgba(78, 57, 24, .28);
+}
+
+.workshop-evidence-item.is-error {
+  border-color: rgba(255, 123, 123, .34);
+  background: rgba(86, 28, 36, .28);
+}
+
+.workshop-evidence-item.is-neutral {
+  border-color: rgba(116, 199, 255, .24);
+  background: rgba(30, 64, 91, .24);
+}
+
+.workshop-evidence-reason {
+  grid-column: 1 / -1;
+}
+
+.workshop-evidence-reason strong {
+  font-weight: 800;
+}
+
 .workshop-table {
   display: grid;
   margin-top: 10px;
@@ -3248,6 +3316,10 @@ button.watch-chevron {
 
   .workshop-table {
     overflow-x: auto;
+  }
+
+  .workshop-evidence {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .workshop-row {

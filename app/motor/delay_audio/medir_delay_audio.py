@@ -12,7 +12,7 @@ from array import array
 from datetime import datetime
 
 from diagnostico_job import JobDiagnostics, classify_error
-from verificacion_visual import VisualVerifier
+from verificacion_visual import VisualVerifier, parse_json_object, visual_overrides_from_profile_config
 
 
 MAX_DELAY_SEC = 120
@@ -45,6 +45,7 @@ class DelayAudio:
         fps_plan_enabled=False,
         fps_plan_confirmed=False,
         hybrid_enabled=False,
+        hybrid_config=None,
     ):
         self.ref_file = os.path.abspath(ref_file)
         self.esp_file = os.path.abspath(esp_file)
@@ -60,6 +61,7 @@ class DelayAudio:
         self.fps_plan_enabled = bool(fps_plan_enabled)
         self.fps_plan_confirmed = bool(fps_plan_confirmed)
         self.hybrid_enabled = bool(hybrid_enabled)
+        self.hybrid_config = dict(hybrid_config) if isinstance(hybrid_config, dict) else {}
         self.segment_sec = SEGMENT_SEC
         self.max_delay_sec = MAX_DELAY_SEC
         self.max_zones = MAX_ZONES
@@ -476,69 +478,132 @@ class DelayAudio:
             )
         return row
 
+    def hybrid_section(self, name):
+        section = self.hybrid_config.get(name)
+        return section if isinstance(section, dict) else {}
+
+    @staticmethod
+    def config_number(section, key, default, minimum=None, maximum=None, integer=False):
+        value = section.get(key, default)
+        if isinstance(value, bool):
+            value = default
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = float(default)
+        if not math.isfinite(number):
+            number = float(default)
+        if minimum is not None:
+            number = max(float(minimum), number)
+        if maximum is not None:
+            number = min(float(maximum), number)
+        return int(round(number)) if integer else number
+
+    @staticmethod
+    def config_pcts(section, key, default):
+        if key not in section:
+            return list(default)
+        values = section.get(key)
+        if not isinstance(values, list):
+            return list(default)
+        result = []
+        for value in values:
+            if isinstance(value, bool):
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(number):
+                continue
+            result.append(max(0.0, min(100.0, number)))
+        return result
+
     def fast_audio_settings(self, duration_sec, around_hint=False):
         duration = max(1.0, float(duration_sec))
+        configured = self.hybrid_section("audio_narrow")
         if self.profile == "trailer":
-            segment = min(8.0, max(6.0, duration * 0.12))
+            segment_cap = self.config_number(configured, "segment_cap_sec", 8.0, minimum=6.0, maximum=8.0)
+            segment = min(segment_cap, max(6.0, duration * 0.12))
             if duration <= segment + 0.5:
                 segment = max(2.0, duration - 0.5)
             return {
-                "zone_pcts": [35.0, 70.0],
+                "zone_pcts": self.config_pcts(configured, "zone_pcts", [35.0, 70.0]),
                 "segment_sec": segment,
-                "radius_ms": 4000 if around_hint else 1500,
-                "tolerance_ms": 140,
-                "score_min": 0.30,
-                "avg_score_min": 0.38,
-                "strong_score_min": 0.48,
+                "radius_ms": self.config_number(
+                    configured,
+                    "hint_radius_ms" if around_hint else "radius_ms",
+                    4000 if around_hint else 1500,
+                    minimum=FINE_FRAME_MS,
+                    maximum=4000 if around_hint else 1500,
+                    integer=True,
+                ),
+                "tolerance_ms": self.config_number(configured, "tolerance_ms", 140, minimum=20, maximum=140, integer=True),
+                "score_min": self.config_number(configured, "score_min", 0.30, minimum=0.30, maximum=1.0),
+                "avg_score_min": self.config_number(configured, "avg_score_min", 0.38, minimum=0.38, maximum=1.0),
+                "strong_score_min": self.config_number(configured, "strong_score_min", 0.48, minimum=0.48, maximum=1.0),
             }
+        segment_cap = self.config_number(configured, "segment_cap_sec", 25.0, minimum=8.0, maximum=25.0)
         return {
-            "zone_pcts": [30.0, 70.0],
-            "segment_sec": min(25.0, max(8.0, duration - 0.5)),
-            "radius_ms": 6000 if around_hint else 2000,
-            "tolerance_ms": 180,
-            "score_min": 0.30,
-            "avg_score_min": 0.38,
-            "strong_score_min": 0.48,
+            "zone_pcts": self.config_pcts(configured, "zone_pcts", [30.0, 70.0]),
+            "segment_sec": min(segment_cap, max(8.0, duration - 0.5)),
+            "radius_ms": self.config_number(
+                configured,
+                "hint_radius_ms" if around_hint else "radius_ms",
+                6000 if around_hint else 2000,
+                minimum=FINE_FRAME_MS,
+                maximum=6000 if around_hint else 2000,
+                integer=True,
+            ),
+            "tolerance_ms": self.config_number(configured, "tolerance_ms", 180, minimum=20, maximum=180, integer=True),
+            "score_min": self.config_number(configured, "score_min", 0.30, minimum=0.30, maximum=1.0),
+            "avg_score_min": self.config_number(configured, "avg_score_min", 0.38, minimum=0.38, maximum=1.0),
+            "strong_score_min": self.config_number(configured, "strong_score_min", 0.48, minimum=0.48, maximum=1.0),
         }
 
     def discovery_audio_settings(self, duration_sec):
         duration = max(1.0, float(duration_sec))
+        configured = self.hybrid_section("audio_discovery")
         if self.profile == "trailer":
-            segment = min(12.0, max(8.0, duration * 0.12))
+            segment_cap = self.config_number(configured, "segment_cap_sec", 12.0, minimum=8.0, maximum=12.0)
+            max_delay_sec = self.config_number(configured, "max_delay_ms", 12000, minimum=500, maximum=12000, integer=True) / 1000.0
+            segment = min(segment_cap, max(8.0, duration * 0.12))
             if duration <= segment + 0.5:
                 segment = max(2.0, duration - 0.5)
             required_span = segment * 0.45 * 2.0
             radius = min(
-                12.0,
+                max_delay_sec,
                 duration * 0.20,
                 max(0.0, (duration - segment - required_span - 0.1) / 2.0),
             )
             return {
-                "initial_zone_pcts": [20.0, 50.0, 80.0],
-                "extra_zone_pcts": [35.0, 65.0, 90.0],
+                "initial_zone_pcts": self.config_pcts(configured, "initial_zone_pcts", [20.0, 50.0, 80.0]),
+                "extra_zone_pcts": self.config_pcts(configured, "extra_zone_pcts", [35.0, 65.0, 90.0]),
                 "segment_sec": segment,
                 "radius_ms": max(500, int(round(radius * 1000.0))),
-                "tolerance_ms": 120,
-                "score_min": 0.18,
-                "support_avg_min": 0.38,
-                "support_strong_min": 0.48,
-                "max_audio_zones": 6,
-                "max_visual_candidates": 4,
+                "tolerance_ms": self.config_number(configured, "tolerance_ms", 120, minimum=20, maximum=120, integer=True),
+                "score_min": self.config_number(configured, "score_min", 0.18, minimum=0.18, maximum=1.0),
+                "support_avg_min": self.config_number(configured, "support_avg_min", 0.38, minimum=0.38, maximum=1.0),
+                "support_strong_min": self.config_number(configured, "support_strong_min", 0.48, minimum=0.48, maximum=1.0),
+                "max_audio_zones": self.config_number(configured, "max_audio_zones", 6, minimum=2, maximum=6, integer=True),
+                "max_visual_candidates": self.config_number(configured, "max_visual_candidates", 4, minimum=1, maximum=4, integer=True),
             }
-        segment = min(40.0, max(12.0, duration - 0.5))
+        segment_cap = self.config_number(configured, "segment_cap_sec", 40.0, minimum=12.0, maximum=40.0)
+        max_delay_sec = self.config_number(configured, "max_delay_ms", 45000, minimum=1000, maximum=45000, integer=True) / 1000.0
+        segment = min(segment_cap, max(12.0, duration - 0.5))
         required_span = segment * 0.45 * 3.0
-        radius = min(45.0, max(0.0, (duration - segment - required_span - 0.1) / 2.0))
+        radius = min(max_delay_sec, max(0.0, (duration - segment - required_span - 0.1) / 2.0))
         return {
-            "initial_zone_pcts": [12.0, 37.0, 63.0, 88.0],
-            "extra_zone_pcts": [22.0, 50.0, 78.0, 95.0],
+            "initial_zone_pcts": self.config_pcts(configured, "initial_zone_pcts", [12.0, 37.0, 63.0, 88.0]),
+            "extra_zone_pcts": self.config_pcts(configured, "extra_zone_pcts", [22.0, 50.0, 78.0, 95.0]),
             "segment_sec": segment,
             "radius_ms": max(1000, int(round(radius * 1000.0))),
-            "tolerance_ms": 160,
-            "score_min": 0.18,
-            "support_avg_min": 0.38,
-            "support_strong_min": 0.48,
-            "max_audio_zones": 8,
-            "max_visual_candidates": 4,
+            "tolerance_ms": self.config_number(configured, "tolerance_ms", 160, minimum=20, maximum=160, integer=True),
+            "score_min": self.config_number(configured, "score_min", 0.18, minimum=0.18, maximum=1.0),
+            "support_avg_min": self.config_number(configured, "support_avg_min", 0.38, minimum=0.38, maximum=1.0),
+            "support_strong_min": self.config_number(configured, "support_strong_min", 0.48, minimum=0.48, maximum=1.0),
+            "max_audio_zones": self.config_number(configured, "max_audio_zones", 8, minimum=2, maximum=8, integer=True),
+            "max_visual_candidates": self.config_number(configured, "max_visual_candidates", 4, minimum=1, maximum=4, integer=True),
         }
 
     @staticmethod
@@ -661,18 +726,29 @@ class DelayAudio:
             })
         return sorted(ranked, key=lambda item: (item["count"], item["avg_score"]), reverse=True)
 
-    @staticmethod
-    def remove_work_dir_checked(work_dir):
+    def remove_work_dir_checked(self, work_dir):
         if os.path.isdir(work_dir):
             try:
                 shutil.rmtree(work_dir)
             except OSError as exc:
+                self.diag.event("cleanup", "failed", "No se pudo eliminar el temporal de medición", {
+                    "scope": "measurement_tmp",
+                    "path": work_dir,
+                    "error": str(exc),
+                    "decision": "remaining",
+                }, level="error")
                 raise RuntimeError(f"No he podido eliminar el temporal propio: {work_dir}") from exc
         if os.path.exists(work_dir):
+            self.diag.event("cleanup", "failed", "El temporal de medición sigue existiendo", {
+                "scope": "measurement_tmp",
+                "path": work_dir,
+                "error": "path_still_exists",
+                "decision": "remaining",
+            }, level="error")
             raise RuntimeError(f"El temporal propio sigue existiendo: {work_dir}")
 
     def hybrid_fps_summary(self):
-        return {
+        summary = {
             "planned": self.fps_plan_enabled,
             "confirmed": self.fps_plan_confirmed,
             "applied": bool(self.fps_plan_enabled and self.fps_plan_confirmed),
@@ -680,6 +756,14 @@ class DelayAudio:
             "esp_fps": self.fps_esp,
             "tempo": self.fps_tempo,
         }
+        if not self.fps_plan_enabled:
+            if self.fps_ref > 0 and self.fps_esp > 0 and round(self.fps_ref, 3) == round(self.fps_esp, 3):
+                summary["reason"] = "fps_iguales"
+            elif self.fps_ref <= 0 or self.fps_esp <= 0:
+                summary["reason"] = "fps_no_detectado"
+            else:
+                summary["reason"] = "fps_no_confirmado"
+        return summary
 
     def finish_hybrid_result(
         self,
@@ -724,20 +808,28 @@ class DelayAudio:
         }
         self.write_result(data)
         self.write_progress("done", 100, "Verificado" if verified else "Bloqueado")
-        self.diag.event("hybrid_decision", "finished", "Decisión híbrida terminada", {
+        self.diag.event("measurement", "result_candidate", "Resultado candidato del motor", {
+            "profile": self.profile,
             "state": state,
             "export_allowed": verified,
             "delay_ms": data["delay_ms"],
             "reason": reason,
             "contradictions": list(contradictions or []),
-            "timing": timing,
+            "duration_sec": timing.get("measurement_sec"),
         })
         self.diag.finish("done", data)
         return 0
 
     def create_visual_verifier(self):
+        visual_overrides = visual_overrides_from_profile_config(self.hybrid_config)
         return VisualVerifier(
-            event_callback=lambda phase, event, data: self.diag.event(phase, event, "Verificación visual", data)
+            profile_overrides={self.profile: visual_overrides},
+            event_callback=lambda phase, event, data: self.diag.event(
+                "visual_gate" if phase == "visual_fast_path" else phase,
+                event,
+                "Verificación visual",
+                data,
+            ),
         )
 
     def run_hybrid_discovery(
@@ -760,6 +852,21 @@ class DelayAudio:
             settings["initial_zone_pcts"],
         )
         if len(initial_zones) < 2:
+            self.diag.event("audio_discovery", "started", "Descubrimiento de candidatos iniciado", {
+                "profile": self.profile,
+                "initial_reason": initial_reason,
+                "zone_pcts": settings["initial_zone_pcts"],
+                "segment_sec": settings["segment_sec"],
+                "radius_ms": settings["radius_ms"],
+            })
+            self.diag.event("audio_discovery", "finished", "Descubrimiento sin dos zonas independientes", {
+                "zones_attempted": 0,
+                "zones_measured": 0,
+                "expanded": False,
+                "expansion_reason": "insufficient_discovery_zones",
+                "candidate_delays_ms": [],
+                "duration_sec": 0.0,
+            })
             visual = dict(fast_visual or {})
             visual["verified"] = False
             audio = {
@@ -851,11 +958,17 @@ class DelayAudio:
                     self.diag.event("audio_discovery", "zone_finished", "Zona de descubrimiento medida", row)
                 except Exception as exc:
                     self.log(f"ERROR DESCUBRIMIENTO ZONA {index}: {exc}")
-                    self.diag.error(classify_error(str(exc)), "audio_discovery", "Zona de descubrimiento fallida", {
-                        "zone": index,
-                        "error": str(exc),
-                    }, exc)
-                    if not self.is_expected_zone_rejection(exc):
+                    if self.is_expected_zone_rejection(exc):
+                        self.diag.event("audio_discovery", "zone_rejected", "Zona de descubrimiento no útil", {
+                            "zone": index,
+                            "reason": str(exc),
+                            "decision": "skipped",
+                        })
+                    else:
+                        self.diag.error(classify_error(str(exc)), "audio_discovery", "Zona de descubrimiento fallida", {
+                            "zone": index,
+                            "error": str(exc),
+                        }, exc)
                         raise RuntimeError(
                             f"Fallo técnico en zona de descubrimiento {index}: {exc}"
                         ) from exc
@@ -955,6 +1068,16 @@ class DelayAudio:
         for candidate in visual.get("candidates") or []:
             self.diag.event("visual_final", "candidate_scored", "Candidato visual final puntuado", candidate)
         visual_final_sec = time.monotonic() - visual_started
+        self.diag.event("visual_final", "finished", "Validación visual final terminada", {
+            "profile": self.profile,
+            "zones_attempted": int(visual.get("zones_attempted") or 0),
+            "zones_valid": int(visual.get("zones_valid") or 0),
+            "zones_strong": int(visual.get("zones_strong") or 0),
+            "winner_delay_ms": visual.get("winner_delay_ms"),
+            "unique_winner": bool(visual.get("unique_winner")),
+            "strong_winner": bool(visual.get("strong_winner")),
+            "duration_sec": round(visual_final_sec, 3),
+        })
 
         tolerance_ms = int(settings["tolerance_ms"])
         visual_winner = visual.get("winner_delay_ms")
@@ -1176,6 +1299,14 @@ class DelayAudio:
         os.makedirs(work_dir, exist_ok=True)
         audio_started = time.monotonic()
         rows = []
+        self.diag.event("audio_narrow", "started", "Corroboración de audio estrecho iniciada", {
+            "profile": self.profile,
+            "candidate_ms": winner_delay,
+            "zones": len(zones),
+            "segment_sec": settings["segment_sec"],
+            "radius_ms": settings["radius_ms"],
+            "tolerance_ms": settings["tolerance_ms"],
+        })
         self.write_progress("audio_narrow", 0, "Audio", len(zones), 0)
         try:
             for index, zone in enumerate(zones, 1):
@@ -1203,11 +1334,17 @@ class DelayAudio:
                     self.diag.event("audio_narrow", "zone_finished", "Audio estrecho medido", row)
                 except Exception as exc:
                     self.log(f"ERROR AUDIO ESTRECHO ZONA {index}: {exc}")
-                    self.diag.error(classify_error(str(exc)), "audio_narrow", "Zona de audio estrecho fallida", {
-                        "zone": index,
-                        "error": str(exc),
-                    }, exc)
-                    if not self.is_expected_zone_rejection(exc):
+                    if self.is_expected_zone_rejection(exc):
+                        self.diag.event("audio_narrow", "zone_rejected", "Zona de audio estrecho no útil", {
+                            "zone": index,
+                            "reason": str(exc),
+                            "decision": "skipped",
+                        })
+                    else:
+                        self.diag.error(classify_error(str(exc)), "audio_narrow", "Zona de audio estrecho fallida", {
+                            "zone": index,
+                            "error": str(exc),
+                        }, exc)
                         raise RuntimeError(
                             f"Fallo técnico en zona de audio estrecho {index}: {exc}"
                         ) from exc
@@ -1268,7 +1405,20 @@ class DelayAudio:
         }
         timing["audio_narrow_sec"] = round(audio_time, 3)
         timing["measurement_sec"] = round(time.monotonic() - total_started, 3)
-        if not contradictions and supporting_zones >= 2:
+        narrow_accepted = not contradictions and supporting_zones >= 2
+        self.diag.event("audio_narrow", "finished", "Corroboración de audio estrecho terminada", {
+            "profile": self.profile,
+            "duration_sec": round(audio_time, 3),
+            "candidate_ms": winner_delay,
+            "delay_ms": audio_delay,
+            "zones_attempted": len(zones),
+            "supporting_zones": supporting_zones,
+            "avg_score": audio_avg_score,
+            "spread_ms": spread_ms,
+            "reason": "fast_path_visual_y_audio_coinciden" if narrow_accepted else "fast_path_audio_inconcluso",
+            "decision": "accepted" if narrow_accepted else "audio_discovery",
+        })
+        if narrow_accepted:
             return self.finish_hybrid_result(
                 "OK_VERIFICADO",
                 audio_delay,
@@ -1348,6 +1498,7 @@ class DelayAudio:
         }
 
     def run(self):
+        run_started = time.monotonic()
         self.reset_logs()
         self.diag.init(inputs={
             "video_bueno": self.ref_file,
@@ -1508,6 +1659,14 @@ class DelayAudio:
             data = {"ok": False, "error": str(exc), "log_path": self.log_path, "csv_path": self.csv_path}
             self.write_result(data)
             self.write_progress("error", 100, "Aviso")
+            if self.hybrid_enabled:
+                self.diag.event("measurement", "failed", "El motor híbrido terminó con error", {
+                    "profile": self.profile,
+                    "state": "ERROR_TECNICO",
+                    "export_allowed": False,
+                    "reason": str(exc),
+                    "duration_sec": round(time.monotonic() - run_started, 3),
+                }, level="error")
             self.diag.error(classify_error(str(exc)), "measure", str(exc), {}, exc)
             self.diag.finish("error", data)
             return 1
@@ -1605,6 +1764,13 @@ def find_best_lag_range(a1, b1, a2, b2, lag_min, lag_max):
     return {"lag": best_lag, "score": best_score, "gap": best_score - second_score}
 
 
+def hybrid_config_json_arg(value):
+    try:
+        return parse_json_object(value, "--hybrid-config-json")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ref", required=True, help="Video bueno de imagen")
@@ -1621,6 +1787,7 @@ def main():
     parser.add_argument("--fps-plan-enabled", action="store_true")
     parser.add_argument("--fps-plan-confirmed", action="store_true")
     parser.add_argument("--hybrid-enabled", action="store_true")
+    parser.add_argument("--hybrid-config-json", type=hybrid_config_json_arg, default={})
     args = parser.parse_args()
     return DelayAudio(
         args.ref,
@@ -1637,6 +1804,7 @@ def main():
         args.fps_plan_enabled,
         args.fps_plan_confirmed,
         args.hybrid_enabled,
+        args.hybrid_config_json,
     ).run()
 
 

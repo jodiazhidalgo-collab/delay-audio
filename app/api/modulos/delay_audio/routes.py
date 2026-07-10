@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -8,6 +9,7 @@ import subprocess
 import threading
 import time
 import uuid
+from copy import deepcopy
 from datetime import datetime
 
 from api.modulos.delay_audio.memoria import guardar_memoria, leer_memoria
@@ -49,6 +51,92 @@ PREVIEW_WINDOW_SEC = 20
 PREVIEW_CLIP_SEC = 85
 PREVIEW_MAX_OFFSET_MS = 60000
 PREVIEW_MAX_AGE_SEC = 6 * 3600
+DEFAULT_HYBRID_CONFIG = {
+    "enabled": False,
+    "visual_method": "ffmpeg_ssim_burst_v1",
+    "movie": {
+        "visual": {
+            "zone_pcts": [18, 50, 82],
+            "fallback_zone_pcts": [10, 30, 70, 90, 40, 60],
+            "burst_sec": 2.0,
+            "fps": 2.0,
+            "width": 192,
+            "height": 108,
+            "crop_safe_pct": 90,
+            "strong_min": 0.88,
+            "valid_min": 0.80,
+            "margin_strong": 0.08,
+            "margin_valid": 0.05,
+            "required_zones": 3,
+            "required_strong": 2,
+            "max_zones": 7,
+            "competitor_ms": 400,
+        },
+        "audio_narrow": {
+            "zone_pcts": [30, 70],
+            "segment_cap_sec": 25.0,
+            "radius_ms": 2000,
+            "hint_radius_ms": 6000,
+            "tolerance_ms": 180,
+            "score_min": 0.30,
+            "avg_score_min": 0.38,
+            "strong_score_min": 0.48,
+        },
+        "audio_discovery": {
+            "initial_zone_pcts": [12, 37, 63, 88],
+            "extra_zone_pcts": [22, 50, 78, 95],
+            "segment_cap_sec": 40.0,
+            "max_delay_ms": 45000,
+            "tolerance_ms": 160,
+            "score_min": 0.18,
+            "support_avg_min": 0.38,
+            "support_strong_min": 0.48,
+            "max_audio_zones": 8,
+            "max_visual_candidates": 4,
+        },
+    },
+    "trailer": {
+        "visual": {
+            "zone_pcts": [22, 58, 82],
+            "fallback_zone_pcts": [35, 75, 15, 88],
+            "burst_sec": 1.5,
+            "fps": 2.0,
+            "width": 160,
+            "height": 90,
+            "crop_safe_pct": 90,
+            "strong_min": 0.88,
+            "valid_min": 0.80,
+            "margin_strong": 0.08,
+            "margin_valid": 0.05,
+            "required_zones": 2,
+            "required_strong": 1,
+            "max_zones": 4,
+            "competitor_ms": 400,
+        },
+        "audio_narrow": {
+            "zone_pcts": [35, 70],
+            "segment_cap_sec": 8.0,
+            "radius_ms": 1500,
+            "hint_radius_ms": 4000,
+            "tolerance_ms": 140,
+            "score_min": 0.30,
+            "avg_score_min": 0.38,
+            "strong_score_min": 0.48,
+        },
+        "audio_discovery": {
+            "initial_zone_pcts": [20, 50, 80],
+            "extra_zone_pcts": [35, 65, 90],
+            "segment_cap_sec": 12.0,
+            "max_delay_ms": 12000,
+            "tolerance_ms": 120,
+            "score_min": 0.18,
+            "support_avg_min": 0.38,
+            "support_strong_min": 0.48,
+            "max_audio_zones": 6,
+            "max_visual_candidates": 4,
+        },
+    },
+}
 DEFAULT_CONFIG = {
     "modo": "medir",
     "perfil": "pelicula",
@@ -56,9 +144,7 @@ DEFAULT_CONFIG = {
     "carpeta_salida": COMPLETE_MOVIES_PATH,
     "sub_video_bueno": "INGLES",
     "sub_fuente_espanol": "ESPAÑOL delay audio",
-    "hybrid": {
-        "enabled": False,
-    },
+    "hybrid": DEFAULT_HYBRID_CONFIG,
 }
 ROOTS = [
     {"key": "data", "label": "Data", "path": DATA_ROOT},
@@ -90,14 +176,241 @@ HYBRID_RESULT_FIELDS = frozenset({
 })
 
 
+def _finite_number(value):
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _number_in_range(value, minimum, maximum, integer=False):
+    if integer:
+        return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= maximum
+    return _finite_number(value) and minimum <= float(value) <= maximum
+
+
+def _numeric_list(value, minimum_items, maximum_items):
+    return bool(
+        isinstance(value, list)
+        and minimum_items <= len(value) <= maximum_items
+        and all(_number_in_range(item, 0, 100) for item in value)
+        and len({float(item) for item in value}) == len(value)
+    )
+
+
+def _exact_keys(value, defaults):
+    return isinstance(value, dict) and set(value) == set(defaults)
+
+
+def _valid_visual_config(value, defaults):
+    if not _exact_keys(value, defaults):
+        return False
+    if not _numeric_list(value.get("zone_pcts"), 1, 8):
+        return False
+    if not _numeric_list(value.get("fallback_zone_pcts"), 1, 10):
+        return False
+    if not _number_in_range(value.get("burst_sec"), 0.25, 30):
+        return False
+    if not _number_in_range(value.get("fps"), 0.25, 30):
+        return False
+    for key in ("width", "height"):
+        if not _number_in_range(value.get(key), 16, 4096, integer=True) or value[key] % 2:
+            return False
+    if not _number_in_range(value.get("crop_safe_pct"), 25, 100):
+        return False
+    for key in ("strong_min", "valid_min", "margin_strong", "margin_valid"):
+        if not _number_in_range(value.get(key), 0, 1):
+            return False
+    if float(value["valid_min"]) > float(value["strong_min"]):
+        return False
+    max_zones = value.get("max_zones")
+    required_zones = value.get("required_zones")
+    required_strong = value.get("required_strong")
+    if not _number_in_range(max_zones, 1, 12, integer=True):
+        return False
+    if not _number_in_range(required_zones, 1, max_zones, integer=True):
+        return False
+    if not _number_in_range(required_strong, 1, required_zones, integer=True):
+        return False
+    return _number_in_range(value.get("competitor_ms"), 20, 120000, integer=True)
+
+
+def _valid_audio_narrow_config(value, defaults):
+    if not _exact_keys(value, defaults):
+        return False
+    if not _numeric_list(value.get("zone_pcts"), 2, 8):
+        return False
+    if not _number_in_range(value.get("segment_cap_sec"), 1, 300):
+        return False
+    if not _number_in_range(value.get("radius_ms"), 20, 120000, integer=True):
+        return False
+    if not _number_in_range(value.get("hint_radius_ms"), value["radius_ms"], 120000, integer=True):
+        return False
+    if not _number_in_range(value.get("tolerance_ms"), 20, 5000, integer=True):
+        return False
+    for key in ("score_min", "avg_score_min", "strong_score_min"):
+        if not _number_in_range(value.get(key), 0, 1):
+            return False
+    return float(value["score_min"]) <= float(value["avg_score_min"]) <= float(value["strong_score_min"])
+
+
+def _valid_audio_discovery_config(value, defaults):
+    if not _exact_keys(value, defaults):
+        return False
+    initial = value.get("initial_zone_pcts")
+    if not _numeric_list(initial, 2, 8):
+        return False
+    if not _numeric_list(value.get("extra_zone_pcts"), 1, 8):
+        return False
+    if not _number_in_range(value.get("segment_cap_sec"), 1, 300):
+        return False
+    if not _number_in_range(value.get("max_delay_ms"), 100, 120000, integer=True):
+        return False
+    if not _number_in_range(value.get("tolerance_ms"), 20, 5000, integer=True):
+        return False
+    for key in ("score_min", "support_avg_min", "support_strong_min"):
+        if not _number_in_range(value.get(key), 0, 1):
+            return False
+    if not float(value["score_min"]) <= float(value["support_avg_min"]) <= float(value["support_strong_min"]):
+        return False
+    max_audio_zones = value.get("max_audio_zones")
+    if not _number_in_range(max_audio_zones, len(initial), 12, integer=True):
+        return False
+    return _number_in_range(value.get("max_visual_candidates"), 1, 8, integer=True)
+
+
+def _valid_hybrid_profile(value, defaults, profile_key):
+    if not (
+        _exact_keys(value, defaults)
+        and _valid_visual_config(value.get("visual"), defaults["visual"])
+        and _valid_audio_narrow_config(value.get("audio_narrow"), defaults["audio_narrow"])
+        and _valid_audio_discovery_config(value.get("audio_discovery"), defaults["audio_discovery"])
+    ):
+        return False
+    visual = value["visual"]
+    narrow = value["audio_narrow"]
+    discovery = value["audio_discovery"]
+    # La configuración interna permite afinar solo dentro de una envolvente
+    # segura. Nunca debe poder abaratar la evidencia mínima ni disparar una
+    # carga absurda aunque el JSON se edite a mano.
+    if any(
+        float(visual[key]) < float(defaults["visual"][key])
+        for key in ("strong_min", "valid_min", "margin_strong", "margin_valid")
+    ):
+        return False
+    if any(
+        float(narrow[key]) < float(defaults["audio_narrow"][key])
+        for key in ("score_min", "avg_score_min", "strong_score_min")
+    ):
+        return False
+    if any(
+        float(discovery[key]) < float(defaults["audio_discovery"][key])
+        for key in ("score_min", "support_avg_min", "support_strong_min")
+    ):
+        return False
+    if int(visual["required_zones"]) < int(defaults["visual"]["required_zones"]):
+        return False
+    if int(visual["required_strong"]) < int(defaults["visual"]["required_strong"]):
+        return False
+    if float(visual["crop_safe_pct"]) != float(defaults["visual"]["crop_safe_pct"]):
+        return False
+    if not float(defaults["visual"]["fps"]) <= float(visual["fps"]) <= 4:
+        return False
+    if int(visual["competitor_ms"]) != int(defaults["visual"]["competitor_ms"]):
+        return False
+    if profile_key == "trailer":
+        return bool(
+            float(defaults["visual"]["burst_sec"]) <= float(visual["burst_sec"]) <= 2.25
+            and int(defaults["visual"]["width"]) <= int(visual["width"]) <= 320
+            and int(defaults["visual"]["height"]) <= int(visual["height"]) <= 180
+            and 6.0 <= float(narrow["segment_cap_sec"]) <= 8.0
+            and int(narrow["radius_ms"]) <= 1500
+            and int(narrow["hint_radius_ms"]) <= 4000
+            and int(narrow["tolerance_ms"]) <= 140
+            and 8.0 <= float(discovery["segment_cap_sec"]) <= 12.0
+            and 500 <= int(discovery["max_delay_ms"]) <= 12000
+            and int(discovery["tolerance_ms"]) <= 120
+            and int(visual["max_zones"]) <= 4
+            and int(discovery["max_audio_zones"]) <= 6
+            and int(discovery["max_visual_candidates"]) <= 4
+        )
+    return bool(
+        float(defaults["visual"]["burst_sec"]) <= float(visual["burst_sec"]) <= 3.0
+        and int(defaults["visual"]["width"]) <= int(visual["width"]) <= 384
+        and int(defaults["visual"]["height"]) <= int(visual["height"]) <= 216
+        and 8.0 <= float(narrow["segment_cap_sec"]) <= 25.0
+        and int(narrow["radius_ms"]) <= 2000
+        and int(narrow["hint_radius_ms"]) <= 6000
+        and int(narrow["tolerance_ms"]) <= 180
+        and 12.0 <= float(discovery["segment_cap_sec"]) <= 40.0
+        and 1000 <= int(discovery["max_delay_ms"]) <= 45000
+        and int(discovery["tolerance_ms"]) <= 160
+        and int(visual["max_zones"]) <= 7
+        and int(discovery["max_audio_zones"]) <= 8
+        and int(discovery["max_visual_candidates"]) <= 4
+    )
+
+
+def hybrid_config_complete(hybrid):
+    return bool(
+        _exact_keys(hybrid, DEFAULT_HYBRID_CONFIG)
+        and isinstance(hybrid.get("enabled"), bool)
+        and hybrid.get("visual_method") == DEFAULT_HYBRID_CONFIG["visual_method"]
+        and _valid_hybrid_profile(hybrid.get("movie"), DEFAULT_HYBRID_CONFIG["movie"], "movie")
+        and _valid_hybrid_profile(hybrid.get("trailer"), DEFAULT_HYBRID_CONFIG["trailer"], "trailer")
+    )
+
+
+def _deep_merge_defaults(defaults, saved):
+    result = deepcopy(defaults)
+    if not isinstance(saved, dict):
+        return result
+    for key, default in defaults.items():
+        if key not in saved:
+            continue
+        value = saved.get(key)
+        if isinstance(default, dict):
+            if isinstance(value, dict):
+                result[key] = _deep_merge_defaults(default, value)
+        else:
+            result[key] = deepcopy(value)
+    return result
+
+
+def normalizar_config_hibrida(raw_hybrid):
+    complete = hybrid_config_complete(raw_hybrid)
+    normalized = _deep_merge_defaults(DEFAULT_HYBRID_CONFIG, raw_hybrid)
+    normalized["enabled"] = bool(complete and raw_hybrid.get("enabled") is True)
+    return normalized
+
+
+def activacion_hibrida_invalida(raw_hybrid):
+    if not isinstance(raw_hybrid, dict) or "enabled" not in raw_hybrid:
+        return False
+    requested = raw_hybrid.get("enabled") is not False
+    return bool(requested and not hybrid_config_complete(raw_hybrid))
+
+
 def hybrid_enabled(config=None):
     config = config if isinstance(config, dict) else leer_config()
     hybrid = config.get("hybrid") if isinstance(config.get("hybrid"), dict) else {}
-    return hybrid.get("enabled") is True
+    return hybrid.get("enabled") is True and hybrid_config_complete(hybrid)
 
 
-def _finite_number(value):
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+def config_hibrida_perfil(config, profile):
+    hybrid = config.get("hybrid") if isinstance(config, dict) and isinstance(config.get("hybrid"), dict) else {}
+    key = "trailer" if profile == "trailer" else "movie"
+    value = hybrid.get(key)
+    defaults = DEFAULT_HYBRID_CONFIG[key]
+    return _deep_merge_defaults(defaults, value)
+
+
+def fingerprint_config_hibrida(profile, enabled, visual_method, profile_config):
+    payload = {
+        "enabled": enabled is True,
+        "profile": profile,
+        "visual_method": visual_method,
+        "profile_config": profile_config,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
 def _hybrid_ok_evidence(confidence, fps_correction, visual, audio, contradictions):
@@ -107,9 +420,40 @@ def _hybrid_ok_evidence(confidence, fps_correction, visual, audio, contradiction
         if key in fps_correction and not isinstance(fps_correction.get(key), bool):
             fps_safe = False
     if fps_correction.get("planned") is True:
-        fps_safe = fps_safe and fps_correction.get("confirmed") is True and fps_correction.get("applied") is True
-    elif fps_correction.get("confirmed") is True or fps_correction.get("applied") is True:
-        fps_safe = False
+        ref_fps = fps_correction.get("ref_fps")
+        esp_fps = fps_correction.get("esp_fps")
+        tempo = fps_correction.get("tempo")
+        fps_safe = bool(
+            fps_safe
+            and fps_correction.get("confirmed") is True
+            and fps_correction.get("applied") is True
+            and _finite_number(ref_fps)
+            and _finite_number(esp_fps)
+            and _finite_number(tempo)
+            and float(ref_fps) > 0
+            and float(esp_fps) > 0
+            and float(tempo) > 0
+            and math.isclose(
+                float(tempo),
+                float(ref_fps) / float(esp_fps),
+                rel_tol=1e-6,
+                abs_tol=1e-9,
+            )
+        )
+    else:
+        ref_fps = fps_correction.get("ref_fps")
+        esp_fps = fps_correction.get("esp_fps")
+        fps_safe = bool(
+            fps_safe
+            and fps_correction.get("reason") == "fps_iguales"
+            and _finite_number(ref_fps)
+            and _finite_number(esp_fps)
+            and float(ref_fps) > 0
+            and float(esp_fps) > 0
+            and abs(round(float(ref_fps), 3) - round(float(esp_fps), 3)) <= FPS_CORRECTION_THRESHOLD
+            and fps_correction.get("confirmed") is False
+            and fps_correction.get("applied") is False
+        )
     return bool(
         confidence == "ALTA"
         and isinstance(visual, dict)
@@ -270,6 +614,22 @@ def resultado_error_tecnico(job, profile, reason, detail=""):
     )
 
 
+def anexar_contexto_resultado_hibrido(result, job, profile):
+    if not isinstance(result, dict):
+        return result
+    result["requested_mode"] = job.get("requested_mode", "")
+    result["profile"] = profile
+    return result
+
+
+def resultado_error_tecnico_con_contexto(job, profile, reason, detail=""):
+    previous = leer_json(job.get("result_path", "")) or {}
+    result = resultado_error_tecnico(job, profile, reason, detail)
+    if isinstance(previous.get("export"), dict):
+        result["export"] = dict(previous["export"])
+    return anexar_contexto_resultado_hibrido(result, job, profile)
+
+
 def normalizar_resultado_hibrido(job, profile):
     result = leer_json(job["result_path"])
     if contrato_resultado_hibrido_valido(result):
@@ -293,7 +653,17 @@ def status_para_resultado(result, fallback="done"):
     return "error" if not result.get("ok", False) else fallback
 
 
-def job_activo_misma_salida(ref, esp, ref_audio, esp_audio, output_dir, delay_hint_ms=0, requested_mode=""):
+def job_activo_misma_salida(
+    ref,
+    esp,
+    ref_audio,
+    esp_audio,
+    output_dir,
+    delay_hint_ms=0,
+    requested_mode="",
+    profile="",
+    hybrid_config_fingerprint="",
+):
     now = time.time()
     delay_hint_ms = int(delay_hint_ms or 0)
     for job in _JOBS.values():
@@ -302,6 +672,10 @@ def job_activo_misma_salida(ref, esp, ref_audio, esp_audio, output_dir, delay_hi
         if not is_running and not is_recent:
             continue
         if requested_mode and job.get("requested_mode", requested_mode) != requested_mode:
+            continue
+        if profile and job.get("profile") != profile:
+            continue
+        if hybrid_config_fingerprint and job.get("hybrid_config_fingerprint") != hybrid_config_fingerprint:
             continue
         same_hint = int(job.get("delay_hint_ms") or 0) == delay_hint_ms
         if job.get("esp") == esp and job.get("output_dir") == output_dir and (is_running or same_hint):
@@ -328,6 +702,14 @@ def fase_error_exportacion(message):
     if "valid" in text or "verificar" in text:
         return "verify_final"
     return "export"
+
+
+def es_error_limpieza_temporal(message):
+    text = str(message or "").lower()
+    return "temporal" in text and any(
+        marker in text
+        for marker in ("eliminar", "limpiar", "sigue existiendo", "cleanup")
+    )
 
 
 def diagnostico_attach(job):
@@ -372,11 +754,50 @@ def diagnostico_update(job, **fields):
         pass
 
 
+def resumen_resultado_diagnostico(result):
+    if not isinstance(result, dict):
+        return {}
+    export = result.get("export") if isinstance(result.get("export"), dict) else {}
+    return {
+        "ok": result.get("ok"),
+        "state": result.get("state"),
+        "delay_ms": result.get("delay_ms"),
+        "confidence": result.get("confidence"),
+        "export_allowed": result.get("export_allowed"),
+        "export_status": export.get("status"),
+        "profile": result.get("profile"),
+    }
+
+
 def diagnostico_finish(job, status, result=None):
     try:
-        diag_finish_job(job, status, result or {})
+        diag_finish_job(job, status, resumen_resultado_diagnostico(result))
     except Exception:
         pass
+
+
+def diagnostico_decision_hibrida(job, result, level=None):
+    if not isinstance(result, dict) or result.get("state") not in HYBRID_FINAL_STATES:
+        return
+    state = result["state"]
+    decision = result.get("decision") if isinstance(result.get("decision"), dict) else {}
+    timing = result.get("timing") if isinstance(result.get("timing"), dict) else {}
+    diagnostico_event(
+        job,
+        "decision",
+        state.lower(),
+        "Decisión híbrida terminada",
+        {
+            "profile": result.get("profile") or job.get("profile"),
+            "state": state,
+            "delay_ms": result.get("delay_ms"),
+            "reason": decision.get("reason"),
+            "contradictions": decision.get("contradictions") or [],
+            "duration_sec": timing.get("measurement_sec"),
+            "decision": "allowed" if result.get("export_allowed") is True else "blocked",
+        },
+        level or ("error" if state == "ERROR_TECNICO" else "info"),
+    )
 
 
 def diagnostico_readme(job):
@@ -671,8 +1092,21 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
         return {"ok": False, "error": error}
 
     cfg = leer_config()
+    if cfg.get("_config_error"):
+        return {"ok": False, "error": str(cfg["_config_error"])}
     requested_mode = limpiar_opcion(cfg.get("modo", DEFAULT_CONFIG["modo"]), {"medir", "exportar"}, DEFAULT_CONFIG["modo"])
+    profile = limpiar_opcion(cfg.get("perfil", DEFAULT_CONFIG["perfil"]), {"pelicula", "trailer"}, DEFAULT_CONFIG["perfil"])
     output_dir = normalizar_ruta(cfg.get("carpeta_salida") or DEFAULT_CONFIG["carpeta_salida"])
+    hybrid_active = hybrid_enabled(cfg)
+    hybrid_root = cfg.get("hybrid") if isinstance(cfg.get("hybrid"), dict) else {}
+    hybrid_profile_config = config_hibrida_perfil(cfg, profile)
+    hybrid_visual_method = hybrid_root.get("visual_method", DEFAULT_HYBRID_CONFIG["visual_method"])
+    hybrid_fingerprint = fingerprint_config_hibrida(
+        profile,
+        hybrid_active,
+        hybrid_visual_method,
+        hybrid_profile_config,
+    )
     fps_correction = planificar_correccion_fps(ref, esp)
     with _LOCK:
         existing = job_activo_misma_salida(
@@ -683,6 +1117,8 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
             output_dir,
             delay_hint_ms,
             requested_mode,
+            profile,
+            hybrid_fingerprint,
         )
         if existing:
             diagnostico_event(existing, "duplicate_guard", "reused", "Peticion duplicada: se reutiliza el job activo", {
@@ -691,11 +1127,15 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
                 "video_espanol": esp,
                 "output_dir": output_dir,
                 "delay_hint_ms": delay_hint_ms,
+                "profile": profile,
+                "hybrid_config_fingerprint": hybrid_fingerprint,
             })
             return {
                 "ok": True,
                 "job": existing.get("id"),
                 "status": existing.get("status", "running"),
+                "requested_mode": existing.get("requested_mode", requested_mode),
+                "profile": existing.get("profile", profile),
                 "duplicate": True,
                 "message": "Ya hay un proceso igual en marcha.",
             }
@@ -715,6 +1155,7 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
             "delay_hint_ms": delay_hint_ms,
             "output_dir": output_dir,
             "requested_mode": requested_mode,
+            "profile": profile,
             "job_dir": job_dir,
             "log_path": os.path.join(job_dir, "MEDIR_DELAY_AUDIO_LOG.txt"),
             "csv_path": os.path.join(job_dir, "MEDIR_DELAY_AUDIO_RESULTADOS.csv"),
@@ -723,7 +1164,10 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
             "returncode": None,
             "error": "",
             "fps_correction": fps_correction,
-            "hybrid_enabled": hybrid_enabled(cfg),
+            "hybrid_enabled": hybrid_active,
+            "hybrid_visual_method": hybrid_visual_method,
+            "hybrid_profile_config": hybrid_profile_config,
+            "hybrid_config_fingerprint": hybrid_fingerprint,
         }
         _JOBS[job_id] = job
     diagnostico_init(job, "delay_audio", inputs={
@@ -733,12 +1177,13 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
         "esp_audio": esp_audio,
     }, settings={
         "modo": requested_mode,
-        "perfil": cfg.get("perfil"),
+        "perfil": profile,
         "confianza_minima": cfg.get("confianza_minima"),
         "carpeta_salida": output_dir,
         "delay_hint_ms": delay_hint_ms,
         "fps_correction": fps_correction,
-        "hybrid_enabled": hybrid_enabled(cfg),
+        "hybrid_enabled": hybrid_active,
+        "hybrid_config_fingerprint": hybrid_fingerprint,
     })
     diagnostico_event(job, "validate_inputs", "finished", "Entradas validadas", {
         "video_bueno": ref,
@@ -747,32 +1192,78 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
     })
     thread = threading.Thread(target=_ejecutar_job, args=(job,), daemon=True)
     thread.start()
-    return {"ok": True, "job": job_id, "status": "running"}
+    return {
+        "ok": True,
+        "job": job_id,
+        "status": "running",
+        "requested_mode": requested_mode,
+        "profile": profile,
+    }
 
 
 def _ejecutar_job(job):
     diagnostico_attach(job)
     stdout_path = os.path.join(job["job_dir"], "stdout.log")
-    cfg = leer_config()
-    profile = limpiar_opcion(cfg.get("perfil", DEFAULT_CONFIG["perfil"]), {"pelicula", "trailer"}, DEFAULT_CONFIG["perfil"])
-    job["profile"] = profile
+    profile = limpiar_opcion(job.get("profile", DEFAULT_CONFIG["perfil"]), {"pelicula", "trailer"}, DEFAULT_CONFIG["perfil"])
     temp_cleanup_paths = []
+    result = {}
     try:
         fps_correction = job.get("fps_correction") or {}
+        if job.get("hybrid_enabled") and not fps_correction.get("planned"):
+            diagnostico_event(job, "fps_plan", "started", "Comprobando estado FPS", {
+                "profile": profile,
+                "ref_fps": fps_correction.get("ref_fps"),
+                "esp_fps": fps_correction.get("esp_fps"),
+                "reason": fps_correction.get("reason"),
+            })
+            if fps_correction.get("reason") == "fps_iguales":
+                diagnostico_event(job, "fps_plan", "confirmed", "No hace falta corrección FPS", {
+                    "profile": profile,
+                    "ref_fps": fps_correction.get("ref_fps"),
+                    "esp_fps": fps_correction.get("esp_fps"),
+                    "reason": "fps_iguales",
+                    "decision": "no_correction_needed",
+                })
+            else:
+                diagnostico_event(job, "fps_plan", "rejected", "No se pudo establecer un plan FPS seguro", {
+                    "profile": profile,
+                    "ref_fps": fps_correction.get("ref_fps"),
+                    "esp_fps": fps_correction.get("esp_fps"),
+                    "reason": fps_correction.get("reason") or "fps_plan_desconocido",
+                    "decision": "blocked",
+                }, level="error")
+                result = anexar_contexto_resultado_hibrido(
+                    resultado_fps_no_confirmados(job, fps_correction, profile),
+                    job,
+                    profile,
+                )
+                escribir_json(job["result_path"], result)
+                exportar_si_corresponde(job)
+                if limpiar_temporales_diagnosticados(job, temp_cleanup_paths, "fps_audio"):
+                    raise RuntimeError("No se pudieron eliminar todos los temporales FPS del job.")
+                result = leer_json(job["result_path"]) or result
+                escribir_progreso(job, "done", 100, "Bloqueado")
+                job["status"] = "done"
+                diagnostico_decision_hibrida(job, result)
+                diagnostico_finish(job, "done", result)
+                return
         if job.get("hybrid_enabled") and fps_correction.get("planned"):
             fps_correction = confirmar_plan_fps(job, fps_correction, profile)
             job["fps_correction"] = fps_correction
             if not fps_correction.get("confirmed"):
-                result = resultado_fps_no_confirmados(job, fps_correction, profile)
+                result = anexar_contexto_resultado_hibrido(
+                    resultado_fps_no_confirmados(job, fps_correction, profile),
+                    job,
+                    profile,
+                )
                 escribir_json(job["result_path"], result)
+                exportar_si_corresponde(job)
+                if limpiar_temporales_diagnosticados(job, temp_cleanup_paths, "fps_audio"):
+                    raise RuntimeError("No se pudieron eliminar todos los temporales FPS del job.")
+                result = leer_json(job["result_path"]) or result
                 escribir_progreso(job, "done", 100, "Bloqueado")
                 job["status"] = "done"
-                diagnostico_event(job, "decision", "fps_no_confirmados", "Plan FPS no confirmado", {
-                    "reason": fps_correction.get("reason"),
-                    "ref_fps": fps_correction.get("ref_fps"),
-                    "esp_fps": fps_correction.get("esp_fps"),
-                    "tempo": fps_correction.get("tempo"),
-                }, level="error")
+                diagnostico_decision_hibrida(job, result)
                 diagnostico_finish(job, "done", result)
                 return
 
@@ -803,6 +1294,12 @@ def _ejecutar_job(job):
             cmd += ["--fps-plan-confirmed"]
         if job.get("hybrid_enabled"):
             cmd += ["--hybrid-enabled"]
+            profile_config = job.get("hybrid_profile_config")
+            if isinstance(profile_config, dict):
+                cmd += [
+                    "--hybrid-config-json",
+                    json.dumps(profile_config, ensure_ascii=False, separators=(",", ":")),
+                ]
         diagnostico_update(job, status="running", profile=profile, delay_hint_ms=int(job.get("delay_hint_ms") or 0))
         diagnostico_event(job, "measure_setup", "started", "Arranca motor de medicion", {
             "profile": profile,
@@ -822,33 +1319,64 @@ def _ejecutar_job(job):
             diagnostico_event(job, "measure_setup", "finished", "Motor de medicion terminado OK", {"returncode": rc})
             anexar_correccion_fps_resultado(job)
             if job.get("hybrid_enabled"):
-                normalizar_resultado_hibrido(job, profile)
-            exportar_si_corresponde(job)
+                result = normalizar_resultado_hibrido(job, profile)
+                anexar_contexto_resultado_hibrido(result, job, profile)
+                escribir_json(job["result_path"], result)
+            exportar_si_corresponde(job, temp_cleanup_paths)
+            if limpiar_temporales_diagnosticados(job, temp_cleanup_paths, "fps_audio"):
+                raise RuntimeError("No se pudieron eliminar todos los temporales FPS del job.")
             job["status"] = "done"
-            diagnostico_finish(job, "done", leer_json(job["result_path"]) or {})
+            result = leer_json(job["result_path"]) or {}
+            if job.get("hybrid_enabled"):
+                anexar_contexto_resultado_hibrido(result, job, profile)
+                escribir_json(job["result_path"], result)
+                diagnostico_decision_hibrida(job, result)
+            diagnostico_finish(job, "done", result)
         else:
             job["status"] = "error"
             message = "El motor de medicion termino con error."
+            motor_result = leer_json(job["result_path"]) or {}
+            motor_error = str(motor_result.get("error") or "")
+            cleanup_failures = limpiar_temporales_diagnosticados(job, temp_cleanup_paths, "fps_audio")
+            if cleanup_failures:
+                message += " No se pudieron eliminar todos los temporales del job."
             if job.get("hybrid_enabled"):
-                escribir_json(job["result_path"], resultado_error_tecnico(job, profile, "motor_medicion_fallido", message))
+                motor_cleanup_failed = es_error_limpieza_temporal(motor_error)
+                if motor_cleanup_failed:
+                    message = motor_error
+                reason = "cleanup_failed" if cleanup_failures or motor_cleanup_failed else "motor_medicion_fallido"
+                result = resultado_error_tecnico_con_contexto(job, profile, reason, message)
+                escribir_json(job["result_path"], result)
+                if not job.get("_export_gate_event"):
+                    exportar_si_corresponde(job)
             diagnostico_error(job, "MEASURE_FAILED", "measure_setup", message, {"returncode": rc, "stdout_log": stdout_path})
-            diagnostico_finish(job, "error", leer_json(job["result_path"]) or {})
+            result = leer_json(job["result_path"]) or result
+            if job.get("hybrid_enabled"):
+                diagnostico_decision_hibrida(job, result)
+            diagnostico_finish(job, "error", result)
     except Exception as exc:
         job["status"] = "error"
-        job["error"] = str(exc)
+        message = str(exc)
+        cleanup_failures = limpiar_temporales_diagnosticados(job, temp_cleanup_paths, "fps_audio")
+        if cleanup_failures and not es_error_limpieza_temporal(message):
+            message = f"{message} No se pudieron eliminar todos los temporales del job."
+        job["error"] = message
         if job.get("hybrid_enabled"):
-            escribir_json(job["result_path"], resultado_error_tecnico(job, profile, "error_tecnico_job", str(exc)))
-        diagnostico_error(job, diag_classify_error(str(exc)), "api_job", str(exc), {"returncode": job.get("returncode")}, exc)
-        diagnostico_finish(job, "error", leer_json(job["result_path"]) or {})
+            reason = "cleanup_failed" if cleanup_failures or es_error_limpieza_temporal(message) else "error_tecnico_job"
+            result = resultado_error_tecnico_con_contexto(job, profile, reason, message)
+            escribir_json(job["result_path"], result)
+            if not job.get("_export_gate_event"):
+                exportar_si_corresponde(job)
+        diagnostico_error(job, diag_classify_error(message), "api_job", message, {"returncode": job.get("returncode")}, exc)
+        result = leer_json(job["result_path"]) or result
+        if job.get("hybrid_enabled"):
+            diagnostico_decision_hibrida(job, result)
+        diagnostico_finish(job, "error", result)
         try:
             with open(job["log_path"], "a", encoding="utf-8") as f:
                 f.write(f"ERROR API: {exc}\n")
         except Exception:
             pass
-    finally:
-        for path in temp_cleanup_paths:
-            diagnostico_event(job, "cleanup", "remove_temp", "Eliminando temporal propio", {"path": path})
-            limpiar_archivo_silencioso(path)
 
 
 def confirmar_plan_fps(job, fps_plan, profile):
@@ -873,35 +1401,53 @@ def confirmar_plan_fps(job, fps_plan, profile):
         "--fps-esp",
         str(fps_plan.get("esp_fps")),
     ]
+    profile_config = job.get("hybrid_profile_config")
+    visual_config = profile_config.get("visual") if isinstance(profile_config, dict) else None
+    if isinstance(visual_config, dict):
+        cmd += [
+            "--profile-config-json",
+            json.dumps(visual_config, ensure_ascii=False, separators=(",", ":")),
+        ]
     started_at = time.time()
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-        timeout=900,
-    )
-    diagnostico_command(
-        job,
-        "fps_plan",
-        "confirm_fps_plan",
-        cmd,
-        proc.returncode,
-        started_at,
-        proc.stdout,
-        proc.stderr,
-        proc.returncode == 0,
-    )
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "No se pudo confirmar el plan FPS").strip()
-        raise RuntimeError(detail[-800:])
     try:
-        confirmation = json.loads(proc.stdout or "{}")
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            timeout=900,
+        )
+        diagnostico_command(
+            job,
+            "fps_plan",
+            "confirm_fps_plan",
+            cmd,
+            proc.returncode,
+            started_at,
+            proc.stdout,
+            proc.stderr,
+            proc.returncode == 0,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "No se pudo confirmar el plan FPS").strip()
+            raise RuntimeError(detail[-800:])
+        try:
+            confirmation = json.loads(proc.stdout or "{}")
+        except Exception as exc:
+            raise RuntimeError("La confirmación FPS no devolvió JSON válido") from exc
+        if not isinstance(confirmation, dict):
+            raise RuntimeError("La confirmación FPS devolvió un resultado inválido")
     except Exception as exc:
-        raise RuntimeError("La confirmación FPS no devolvió JSON válido") from exc
-    if not isinstance(confirmation, dict):
-        raise RuntimeError("La confirmación FPS devolvió un resultado inválido")
+        diagnostico_event(job, "fps_plan", "rejected", "No se pudo confirmar el plan FPS", {
+            "profile": profile,
+            "ref_fps": fps_plan.get("ref_fps"),
+            "esp_fps": fps_plan.get("esp_fps"),
+            "tempo": fps_plan.get("tempo"),
+            "reason": str(exc)[-500:],
+            "decision": "blocked",
+        }, level="error")
+        raise
     result = dict(fps_plan)
     result.update(confirmation)
     result["confirmed"] = confirmation.get("confirmed") is True
@@ -933,7 +1479,7 @@ def resultado_fps_no_confirmados(job, fps_correction, profile):
     )
 
 
-def exportar_si_corresponde(job):
+def exportar_si_corresponde(job, final_cleanup_paths=None):
     diagnostico_attach(job)
     cfg = leer_config()
     requested_mode = job.get("requested_mode") or cfg.get("modo")
@@ -942,6 +1488,7 @@ def exportar_si_corresponde(job):
         return
 
     result = leer_json(job["result_path"]) or {}
+    result_decision = result.get("decision") if isinstance(result.get("decision"), dict) else {}
     log_job(job, "MODO EXPORTAR: activo")
     diagnostico_event(job, "export_prepare", "started", "Modo exportar activo", {
         "confidence": result.get("confidence"),
@@ -951,11 +1498,14 @@ def exportar_si_corresponde(job):
         if not exportacion_hibrida_autorizada(result):
             state = result.get("state") if isinstance(result, dict) else None
             log_job(job, f"EXPORTACION: bloqueada por contrato hibrido ({state or 'resultado_invalido'}).")
+            job["_export_gate_event"] = "blocked"
             diagnostico_event(job, "export_gate", "blocked", "Exportacion bloqueada por contrato hibrido", {
                 "state": state,
-                "export_allowed": result.get("export_allowed") if isinstance(result, dict) else None,
+                "requested_mode": requested_mode,
                 "contract_valid": contrato_resultado_hibrido_valido(result),
-            }, level="error")
+                "reason": result_decision.get("reason") or "resultado_invalido",
+                "decision": "blocked",
+            })
             if isinstance(result, dict):
                 result["export"] = {
                     "ok": False,
@@ -965,9 +1515,13 @@ def exportar_si_corresponde(job):
                 escribir_json(job["result_path"], result)
             escribir_progreso(job, "done", 100, "Bloqueado")
             return
-        diagnostico_event(job, "export_gate", "authorized", "Exportacion autorizada por contrato hibrido", {
+        job["_export_gate_event"] = "allowed"
+        diagnostico_event(job, "export_gate", "allowed", "Exportacion autorizada por contrato hibrido", {
             "state": result.get("state"),
-            "export_allowed": result.get("export_allowed"),
+            "requested_mode": requested_mode,
+            "contract_valid": True,
+            "reason": result_decision.get("reason"),
+            "decision": "allowed",
         })
     elif not result.get("ok"):
         log_job(job, "EXPORTACION: no se exporta porque la medicion no termino OK.")
@@ -1012,6 +1566,7 @@ def exportar_si_corresponde(job):
     escribir_progreso(job, "export", 0, "Exportando")
 
     temp_cleanup_paths = []
+    cleanup_failures = []
     published_output = False
     try:
         diagnostico_event(job, "normalize_audio", "started", "Preparando audio espanol", {"delay_ms": delay_ms})
@@ -1096,6 +1651,13 @@ def exportar_si_corresponde(job):
         diagnostico_event(job, "verify_temp", "started", "Validando temporal", {"temp_output_path": temp_output_path})
         validar_mkv_exportado(temp_output_path, video_duration)
         diagnostico_event(job, "verify_temp", "finished", "Temporal validado", {"temp_output_path": temp_output_path})
+        prepublish_failures = limpiar_temporales_diagnosticados(job, temp_cleanup_paths, "export_audio")
+        if final_cleanup_paths is not None:
+            prepublish_failures.extend(
+                limpiar_temporales_diagnosticados(job, final_cleanup_paths, "fps_audio")
+            )
+        if prepublish_failures:
+            raise RuntimeError("No se pudieron eliminar todos los temporales antes de publicar la exportación.")
         diagnostico_event(job, "publish_output", "started", "Publicando salida final", {
             "temp_output_path": temp_output_path,
             "output_path": output_path,
@@ -1113,12 +1675,7 @@ def exportar_si_corresponde(job):
             "temp_output_path": temp_output_path,
             "published_output": published_output,
         }, exc)
-        diagnostico_event(job, "cleanup", "started", "Limpieza tras error de exportacion", {
-            "temp_output_exists": os.path.isfile(temp_output_path),
-            "output_exists": os.path.isfile(output_path),
-            "published_output": published_output,
-        }, level="error")
-        limpiar_archivo_silencioso(temp_output_path)
+        partial_cleanup = limpiar_temporal_diagnosticado(job, temp_output_path, "export_partial")
         if os.path.isfile(output_path):
             diagnostico_event(job, "cleanup", "preserve_output_path", "Se conserva output_path; la limpieza solo borra temporales propios", {
                 "output_path": output_path,
@@ -1127,17 +1684,28 @@ def exportar_si_corresponde(job):
         result["export"] = {"ok": False, "status": "error", "path": output_path}
         escribir_json(job["result_path"], result)
         escribir_progreso(job, "error", 100, "Aviso")
+        if partial_cleanup["remaining"]:
+            raise RuntimeError(f"{exc} No se pudo eliminar el temporal parcial de exportación.") from exc
         raise
     finally:
-        for path in temp_cleanup_paths:
-            diagnostico_event(job, "cleanup", "remove_temp", "Eliminando temporal propio", {"path": path})
-            limpiar_archivo_silencioso(path)
+        cleanup_failures.extend(limpiar_temporales_diagnosticados(job, temp_cleanup_paths, "export_audio"))
+
+    if cleanup_failures:
+        result["export"] = {
+            "ok": False,
+            "status": "error",
+            "path": output_path,
+            "reason": "cleanup_failed",
+        }
+        escribir_json(job["result_path"], result)
+        escribir_progreso(job, "error", 100, "Aviso")
+        raise RuntimeError("No se pudieron eliminar todos los temporales de exportación.")
 
     result["export"] = {"ok": True, "status": "done", "path": output_path}
     escribir_json(job["result_path"], result)
     escribir_progreso(job, "done", 100, "Listo")
     log_job(job, f"EXPORTACION OK: {output_path}")
-    diagnostico_event(job, "finished", "export_done", "Exportacion terminada OK", {"output_path": output_path})
+    diagnostico_event(job, "export", "finished", "Exportacion terminada OK", {"output_path": output_path})
     diagnostico_readme(job)
 
 
@@ -1157,6 +1725,8 @@ def estado(job_id):
         "status": status,
         "ref": job.get("ref", ""),
         "esp": job.get("esp", ""),
+        "requested_mode": job.get("requested_mode", ""),
+        "profile": job.get("profile") or (result.get("profile", "") if isinstance(result, dict) else ""),
         "log": leer_tail(job["log_path"]),
         "rows": rows,
         "result": result,
@@ -1191,11 +1761,18 @@ def obtener_job(job_id):
     job_dir = os.path.join(LOG_ROOT, os.path.basename(job_id))
     if not os.path.isdir(job_dir):
         return None
+    metadata = leer_json(os.path.join(job_dir, "job.json")) or {}
+    settings = metadata.get("settings") if isinstance(metadata.get("settings"), dict) else {}
+    inputs = metadata.get("inputs") if isinstance(metadata.get("inputs"), dict) else {}
+    requested_mode = settings.get("modo") if settings.get("modo") in {"medir", "exportar"} else ""
+    profile = settings.get("perfil") if settings.get("perfil") in {"pelicula", "trailer"} else ""
     return {
         "id": os.path.basename(job_id),
-        "status": "done",
-        "ref": "",
-        "esp": "",
+        "status": metadata.get("status") or "done",
+        "ref": inputs.get("video_bueno", ""),
+        "esp": inputs.get("video_espanol", ""),
+        "requested_mode": requested_mode,
+        "profile": profile,
         "job_dir": job_dir,
         "log_path": os.path.join(job_dir, "MEDIR_DELAY_AUDIO_LOG.txt"),
         "csv_path": os.path.join(job_dir, "MEDIR_DELAY_AUDIO_RESULTADOS.csv"),
@@ -1413,15 +1990,29 @@ def guardar_memoria_compartida(q):
 
 
 def leer_config():
-    data = dict(DEFAULT_CONFIG)
+    data = deepcopy(DEFAULT_CONFIG)
+    saved = {}
+    config_error = ""
     try:
         if os.path.isfile(CONFIG_PATH):
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
-                data.update({k: saved.get(k, v) for k, v in DEFAULT_CONFIG.items()})
+                for key, default in DEFAULT_CONFIG.items():
+                    if key != "hybrid" and key in saved:
+                        data[key] = deepcopy(saved.get(key, default))
+            else:
+                config_error = "La configuración de Delay Audio no contiene un objeto JSON válido."
+                saved = {}
     except Exception:
-        pass
+        config_error = "No se puede leer la configuración de Delay Audio; el trabajo queda bloqueado."
+        saved = {}
+    raw_hybrid = saved.get("hybrid") if isinstance(saved, dict) else None
+    if activacion_hibrida_invalida(raw_hybrid):
+        config_error = "hybrid.enabled solicita activación, pero la configuración híbrida está incompleta o no es válida."
+    data["hybrid"] = normalizar_config_hibrida(raw_hybrid)
+    if config_error:
+        data["_config_error"] = config_error
     if data.get("carpeta_salida") == QUEUE_MOVIES_PATH:
         data["carpeta_salida"] = COMPLETE_MOVIES_PATH
     return data
@@ -1429,6 +2020,13 @@ def leer_config():
 
 def guardar_config_desde_query(q):
     data = leer_config()
+    if data.get("_config_error"):
+        settings = {key: deepcopy(data[key]) for key in DEFAULT_CONFIG}
+        return {
+            "ok": False,
+            "error": str(data["_config_error"]),
+            "settings": settings,
+        }
     data["modo"] = limpiar_opcion(q.get("modo", [data["modo"]])[0], {"medir", "exportar"}, data["modo"])
     data["perfil"] = limpiar_opcion(
         q.get("perfil", [data.get("perfil", DEFAULT_CONFIG["perfil"])])[0],
@@ -1443,9 +2041,10 @@ def guardar_config_desde_query(q):
     data["sub_video_bueno"] = limpiar_texto(q.get("sub_video_bueno", [data["sub_video_bueno"]])[0], DEFAULT_CONFIG["sub_video_bueno"])
     data["sub_fuente_espanol"] = limpiar_texto(q.get("sub_fuente_espanol", [data["sub_fuente_espanol"]])[0], DEFAULT_CONFIG["sub_fuente_espanol"])
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    persisted = {key: deepcopy(data[key]) for key in DEFAULT_CONFIG}
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    return {"ok": True, "settings": data}
+        json.dump(persisted, f, ensure_ascii=False, indent=2)
+    return {"ok": True, "settings": persisted}
 
 
 def limpiar_opcion(value, validos, fallback):
@@ -1638,11 +2237,55 @@ def publicar_exportacion_temporal(temp_output_path, output_path):
 
 
 def limpiar_archivo_silencioso(path):
+    existed = bool(path and os.path.isfile(path))
+    error = ""
     try:
-        if path and os.path.isfile(path):
+        if existed:
             os.remove(path)
-    except Exception:
-        pass
+    except Exception as exc:
+        error = str(exc)
+    remaining = bool(path and os.path.isfile(path))
+    return {
+        "existed": existed,
+        "removed": existed and not remaining,
+        "remaining": remaining,
+        "error": error,
+    }
+
+
+def limpiar_temporal_diagnosticado(job, path, scope):
+    started = time.monotonic()
+    outcome = limpiar_archivo_silencioso(path)
+    data = {
+        "scope": scope,
+        "path": path,
+        "removed_count": 1 if outcome["removed"] else 0,
+        "remaining_count": 1 if outcome["remaining"] else 0,
+        "error": outcome["error"],
+        "duration_sec": round(time.monotonic() - started, 3),
+        "decision": "clean" if not outcome["remaining"] else "remaining",
+    }
+    diagnostico_event(
+        job,
+        "cleanup",
+        "remove_temp",
+        "Limpieza de temporal propio comprobada",
+        data,
+        level="error" if outcome["remaining"] else "info",
+    )
+    if outcome["remaining"]:
+        diagnostico_error(job, "CLEANUP_FAILED", "cleanup", "No se pudo eliminar un temporal propio", data)
+    return outcome
+
+
+def limpiar_temporales_diagnosticados(job, paths, scope):
+    failures = []
+    for path in list(paths):
+        outcome = limpiar_temporal_diagnosticado(job, path, scope)
+        if outcome["remaining"]:
+            failures.append(path)
+    paths[:] = failures
+    return failures
 
 
 def planificar_correccion_fps(ref, esp):

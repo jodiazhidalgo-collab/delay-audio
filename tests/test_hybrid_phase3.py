@@ -17,7 +17,14 @@ def verified_result(**overrides):
         "state": "OK_VERIFICADO",
         "delay_ms": 120,
         "confidence": "ALTA",
-        "fps_correction": {},
+        "fps_correction": {
+            "planned": False,
+            "confirmed": False,
+            "applied": False,
+            "reason": "fps_iguales",
+            "ref_fps": 23.976,
+            "esp_fps": 23.976,
+        },
         "visual": {"verified": True},
         "audio": {"supporting_zones": 2},
         "reason": "audio_and_visual_agree",
@@ -40,6 +47,12 @@ def complete_legacy_result():
 
 
 class HybridResultContractTests(unittest.TestCase):
+    def test_cleanup_reason_only_matches_real_removal_failures(self):
+        self.assertTrue(routes.es_error_limpieza_temporal("No he podido eliminar el temporal propio"))
+        self.assertTrue(routes.es_error_limpieza_temporal("El temporal sigue existiendo"))
+        self.assertFalse(routes.es_error_limpieza_temporal("No he podido crear un temporal libre"))
+        self.assertFalse(routes.es_error_limpieza_temporal("El audio temporal normalizado está vacío"))
+
     def test_all_required_final_states_exist(self):
         self.assertEqual(
             routes.HYBRID_FINAL_STATES,
@@ -75,6 +88,40 @@ class HybridResultContractTests(unittest.TestCase):
         result = verified_result(fps_correction={"planned": True, "confirmed": False, "applied": False})
         self.assertEqual(result["state"], "NO_FIABLE")
         self.assertIs(result["export_allowed"], False)
+
+    def test_planned_fps_requires_finite_coherent_ratio(self):
+        invalid_plans = (
+            {"planned": True, "confirmed": True, "applied": True},
+            {"planned": True, "confirmed": True, "applied": True, "ref_fps": 0, "esp_fps": 0, "tempo": -9},
+            {"planned": True, "confirmed": True, "applied": True, "ref_fps": 23.976, "esp_fps": 24, "tempo": 1.25},
+        )
+        for fps in invalid_plans:
+            with self.subTest(fps=fps):
+                result = verified_result(fps_correction=fps)
+                self.assertEqual(result["state"], "NO_FIABLE")
+                self.assertFalse(routes.exportacion_hibrida_autorizada(result))
+
+        valid = verified_result(fps_correction={
+            "planned": True,
+            "confirmed": True,
+            "applied": True,
+            "ref_fps": 24000 / 1001,
+            "esp_fps": 24.0,
+            "tempo": (24000 / 1001) / 24.0,
+        })
+        self.assertEqual(valid["state"], "OK_VERIFICADO")
+        self.assertTrue(routes.exportacion_hibrida_autorizada(valid))
+
+    def test_unknown_or_missing_fps_cannot_become_verified(self):
+        for fps in (
+            {},
+            {"planned": False, "confirmed": False, "applied": False, "reason": "fps_no_detectado"},
+            {"planned": False, "confirmed": False, "applied": False, "reason": "tempo_no_valido"},
+        ):
+            with self.subTest(fps=fps):
+                result = verified_result(fps_correction=fps)
+                self.assertEqual(result["state"], "NO_FIABLE")
+                self.assertIs(result["export_allowed"], False)
 
     def test_text_fps_flags_cannot_become_verified(self):
         result = verified_result(fps_correction={"planned": "false", "confirmed": "true", "applied": "true"})
@@ -141,6 +188,17 @@ class HybridResultContractTests(unittest.TestCase):
 
 
 class HybridExportGateTests(unittest.TestCase):
+    def test_failed_cleanup_paths_are_kept_for_retry(self):
+        paths = ["removed.tmp", "remaining.tmp"]
+        outcomes = {
+            "removed.tmp": {"remaining": False},
+            "remaining.tmp": {"remaining": True},
+        }
+        with patch.object(routes, "limpiar_temporal_diagnosticado", side_effect=lambda job, path, scope: outcomes[path]):
+            failures = routes.limpiar_temporales_diagnosticados({}, paths, "test")
+        self.assertEqual(failures, ["remaining.tmp"])
+        self.assertEqual(paths, ["remaining.tmp"])
+
     def test_duplicate_guard_does_not_reuse_a_job_with_different_mode(self):
         running = {
             "id": "existing",

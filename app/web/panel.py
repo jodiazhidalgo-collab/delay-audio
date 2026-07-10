@@ -24,7 +24,7 @@ def pagina():
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Delay Audio</title>
-  <link rel="stylesheet" href="/static/css/delay_audio.css?v=autoapertura-reflejo-tarjetas-20260620">
+  <link rel="stylesheet" href="/static/css/delay_audio.css?v=resultado-hibrido-fase6-20260710">
 </head>
 <body>
   <main class="shell">
@@ -47,6 +47,6 @@ def pagina():
   <script src="/static/js/entry_sound.js?v=entrada-silenciosa-20260621"></script>
   <script src="/static/js/delay_audio_sounds.js?v=sonido-final-procesos-20260619"></script>
   <script>window.DelayAudioConfig = {path_config};</script>
-  <script src="/static/js/delay_audio.js?v=entrada-silenciosa-20260621"></script>
+  <script src="/static/js/delay_audio.js?v=resultado-hibrido-fase6-20260710"></script>
 </body>
 </html>'''.encode("utf-8")

@@ -89,6 +89,8 @@ class DeterministicDiscoveryMotor(DelayAudio):
             profile=profile,
             delay_hint_ms=hint,
             esp_video_original="esp-video-original.mkv",
+            fps_ref=24.0,
+            fps_esp=24.0,
             hybrid_enabled=True,
         )
         self.fast_visual_winner = fast_visual_winner

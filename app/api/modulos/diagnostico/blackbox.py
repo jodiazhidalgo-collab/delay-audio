@@ -279,6 +279,8 @@ def write_readme(job):
 
 def classify_error(message):
     text = str(message or "").lower()
+    if "temporal" in text and any(word in text for word in ("eliminar", "limpiar", "sigue existiendo")):
+        return "CLEANUP_FAILED"
     if "no encuentro" in text or "not found" in text or "no existe" in text:
         return "INPUT_NOT_FOUND"
     if "ffprobe" in text:

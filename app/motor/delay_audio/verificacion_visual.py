@@ -60,6 +60,24 @@ DEFAULT_VISUAL_CONFIG: dict[str, dict[str, Any]] = {
     },
 }
 
+FRIENDLY_VISUAL_KEYS = {
+    "zone_pcts": "visual_zone_pcts",
+    "fallback_zone_pcts": "visual_zone_fallback_pcts",
+    "burst_sec": "visual_burst_sec",
+    "fps": "visual_fps",
+    "width": "visual_width",
+    "height": "visual_height",
+    "crop_safe_pct": "visual_crop_safe_pct",
+    "strong_min": "visual_strong_min",
+    "valid_min": "visual_valid_min",
+    "margin_strong": "visual_margin_strong",
+    "margin_valid": "visual_margin_valid",
+    "required_zones": "visual_required_zones",
+    "required_strong": "visual_required_strong",
+    "max_zones": "visual_max_zones",
+    "competitor_ms": "visual_competitor_ms",
+}
+
 
 def _finite_float(value: Any, fallback: float = 0.0) -> float:
     try:
@@ -72,6 +90,39 @@ def _finite_float(value: Any, fallback: float = 0.0) -> float:
 def _even(value: float, minimum: int = 2) -> int:
     number = max(minimum, int(round(value)))
     return number if number % 2 == 0 else number - 1
+
+
+def parse_json_object(value: Any, label: str = "configuración") -> dict[str, Any]:
+    if value in (None, ""):
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        payload = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} no contiene JSON válido") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} debe ser un objeto JSON")
+    return payload
+
+
+def visual_overrides_from_profile_config(profile_config: Any) -> dict[str, Any]:
+    """Traduce el esquema público del perfil a las claves internas visuales."""
+
+    profile_data = parse_json_object(profile_config, "profile-config-json")
+    visual = profile_data.get("visual") if isinstance(profile_data.get("visual"), dict) else profile_data
+    return {
+        internal_key: visual[public_key]
+        for public_key, internal_key in FRIENDLY_VISUAL_KEYS.items()
+        if public_key in visual and visual[public_key] is not None
+    }
+
+
+def _profile_config_json_arg(value: str) -> dict[str, Any]:
+    try:
+        return parse_json_object(value, "--profile-config-json")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def map_ref_to_esp_time(ref_time: float, delay_sec: float = 0.0, tempo: float = 1.0) -> float:
@@ -94,9 +145,55 @@ def map_ref_to_esp_time(ref_time: float, delay_sec: float = 0.0, tempo: float = 
 
 def profile_config(profile: str, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     key = "trailer" if str(profile).lower() == "trailer" else "pelicula"
-    result = deepcopy(DEFAULT_VISUAL_CONFIG[key])
+    defaults = DEFAULT_VISUAL_CONFIG[key]
+    result = deepcopy(defaults)
     if isinstance(overrides, dict):
         result.update({name: value for name, value in overrides.items() if value is not None})
+    max_zones = 4 if key == "trailer" else 7
+    result["visual_max_zones"] = max(
+        int(defaults["visual_required_zones"]),
+        min(max_zones, int(_finite_float(result.get("visual_max_zones"), max_zones))),
+    )
+    result["visual_required_zones"] = max(
+        int(defaults["visual_required_zones"]),
+        min(result["visual_max_zones"], int(_finite_float(
+            result.get("visual_required_zones"),
+            defaults["visual_required_zones"],
+        ))),
+    )
+    result["visual_required_strong"] = max(
+        int(defaults["visual_required_strong"]),
+        min(result["visual_required_zones"], int(_finite_float(
+            result.get("visual_required_strong"),
+            defaults["visual_required_strong"],
+        ))),
+    )
+    max_burst = 2.25 if key == "trailer" else 3.0
+    min_burst = float(defaults["visual_burst_sec"])
+    max_width = 320 if key == "trailer" else 384
+    max_height = 180 if key == "trailer" else 216
+    min_width = int(defaults["visual_width"])
+    min_height = int(defaults["visual_height"])
+    result["visual_burst_sec"] = max(min_burst, min(max_burst, _finite_float(
+        result.get("visual_burst_sec"),
+        defaults["visual_burst_sec"],
+    )))
+    result["visual_fps"] = max(float(defaults["visual_fps"]), min(4.0, _finite_float(
+        result.get("visual_fps"),
+        defaults["visual_fps"],
+    )))
+    result["visual_width"] = _even(max(min_width, min(max_width, _finite_float(
+        result.get("visual_width"),
+        defaults["visual_width"],
+    ))))
+    result["visual_height"] = _even(max(min_height, min(max_height, _finite_float(
+        result.get("visual_height"),
+        defaults["visual_height"],
+    ))))
+    result["visual_crop_safe_pct"] = float(defaults["visual_crop_safe_pct"])
+    for name in ("visual_strong_min", "visual_valid_min", "visual_margin_strong", "visual_margin_valid"):
+        result[name] = max(float(defaults[name]), min(1.0, _finite_float(result.get(name), defaults[name])))
+    result["visual_competitor_ms"] = int(defaults["visual_competitor_ms"])
     return result
 
 
@@ -397,6 +494,7 @@ class VisualVerifier:
         zones = pick_zones(ref_meta.duration, profile, cfg)
         zone_results: list[dict[str, Any]] = []
         valid_zones: list[dict[str, Any]] = []
+        pending_replacements: list[dict[str, Any]] = []
         self._event(stage, "started", {
             "profile": profile,
             "candidates": base_candidates,
@@ -465,16 +563,27 @@ class VisualVerifier:
             }
             zone_results.append(zone_payload)
             self._event(stage, "zone_scored", {
-                key: zone_payload[key]
-                for key in ("pct", "start_sec", "state", "winner_delay_ms", "winner_ssim", "winner_margin")
+                "profile": profile,
+                "pct": zone_payload["pct"],
+                "start_sec": zone_payload["start_sec"],
+                "candidate_ms": zone_payload["winner_delay_ms"],
+                "score": zone_payload["winner_ssim"],
+                "margin": zone_payload["winner_margin"],
+                "decision": zone_payload["state"],
             })
             if classification in {"FUERTE", "VALIDA"}:
+                if zone["origin"] == "fallback" and pending_replacements:
+                    replaced = pending_replacements.pop(0)
+                    self._event(stage, "zone_replaced", {
+                        "profile": profile,
+                        "from_pct": replaced["pct"],
+                        "to_pct": zone["pct"],
+                        "reason": replaced["state"],
+                        "decision": classification,
+                    })
                 valid_zones.append(zone_payload)
             elif zone["origin"] == "initial":
-                self._event(stage, "zone_replaced", {
-                    "pct": zone["pct"],
-                    "state": classification,
-                })
+                pending_replacements.append({"pct": zone["pct"], "state": classification})
             if len(valid_zones) >= required:
                 break
 
@@ -509,15 +618,17 @@ class VisualVerifier:
             "esp_video_original": esp_meta.as_dict(),
             "duration_sec": round(time.monotonic() - started, 3),
         }
-        self._event(stage, "finished", {
-            "zones_attempted": result["zones_attempted"],
-            "zones_valid": result["zones_valid"],
-            "zones_strong": result["zones_strong"],
-            "winner_delay_ms": winner_delay,
-            "unique_winner": unique_winner,
-            "strong_winner": strong_winner,
-            "duration_sec": result["duration_sec"],
-        })
+        if stage != "visual_final":
+            self._event(stage, "finished", {
+                "profile": profile,
+                "zones_attempted": result["zones_attempted"],
+                "zones_valid": result["zones_valid"],
+                "zones_strong": result["zones_strong"],
+                "winner_delay_ms": winner_delay,
+                "unique_winner": unique_winner,
+                "strong_winner": strong_winner,
+                "duration_sec": result["duration_sec"],
+            })
         return result
 
     @staticmethod
@@ -750,8 +861,10 @@ def main() -> int:
     parser.add_argument("--tempo", type=float, default=1.0)
     parser.add_argument("--fps-ref", type=float)
     parser.add_argument("--fps-esp", type=float)
+    parser.add_argument("--profile-config-json", type=_profile_config_json_arg, default={})
     args = parser.parse_args()
-    verifier = VisualVerifier()
+    visual_overrides = visual_overrides_from_profile_config(args.profile_config_json)
+    verifier = VisualVerifier(profile_overrides={args.profile: visual_overrides})
     try:
         if args.action == "confirm-fps":
             payload = verifier.confirm_fps_plan(
