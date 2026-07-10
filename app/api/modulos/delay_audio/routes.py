@@ -2253,14 +2253,64 @@ def limpiar_archivo_silencioso(path):
     }
 
 
+def limpiar_directorio_temporal_vacio(job, path):
+    job_dir = job.get("job_dir") if isinstance(job, dict) else ""
+    if not job_dir or not path:
+        return {"path": "", "removed": False, "remaining_empty": False, "error": ""}
+    directory = os.path.realpath(os.path.dirname(path))
+    job_root = os.path.realpath(job_dir)
+    allowed = {
+        os.path.realpath(os.path.join(job_root, "tmp")),
+        os.path.realpath(os.path.join(job_root, "fps")),
+    }
+    if directory not in allowed or not os.path.isdir(directory):
+        return {"path": directory, "removed": False, "remaining_empty": False, "error": ""}
+    error = ""
+    removed = False
+    try:
+        if not os.listdir(directory):
+            os.rmdir(directory)
+            removed = not os.path.exists(directory)
+    except Exception as exc:
+        error = str(exc)
+    remaining_empty = False
+    try:
+        remaining_empty = os.path.isdir(directory) and not os.listdir(directory)
+    except Exception as exc:
+        if not error:
+            error = str(exc)
+        remaining_empty = os.path.isdir(directory)
+    return {
+        "path": directory,
+        "removed": removed,
+        "remaining_empty": remaining_empty,
+        "error": error,
+    }
+
+
 def limpiar_temporal_diagnosticado(job, path, scope):
     started = time.monotonic()
     outcome = limpiar_archivo_silencioso(path)
+    directory = limpiar_directorio_temporal_vacio(job, path) if not outcome["remaining"] else {
+        "path": os.path.dirname(path or ""),
+        "removed": False,
+        "remaining_empty": False,
+        "error": "",
+    }
+    if directory["remaining_empty"]:
+        outcome["remaining"] = True
+        outcome["error"] = directory["error"] or "El directorio temporal vacío sigue existiendo."
+    outcome["directory_path"] = directory["path"]
+    outcome["directory_removed"] = directory["removed"]
+    outcome["directory_remaining_empty"] = directory["remaining_empty"]
     data = {
         "scope": scope,
         "path": path,
         "removed_count": 1 if outcome["removed"] else 0,
         "remaining_count": 1 if outcome["remaining"] else 0,
+        "directory_path": directory["path"],
+        "directory_removed": directory["removed"],
+        "directory_remaining_empty": directory["remaining_empty"],
         "error": outcome["error"],
         "duration_sec": round(time.monotonic() - started, 3),
         "decision": "clean" if not outcome["remaining"] else "remaining",

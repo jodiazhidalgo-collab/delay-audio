@@ -86,6 +86,7 @@ La exportación conserva el vídeo bueno, prepara el audio español, sincroniza 
 - El audio corregido por FPS y el audio normalizado de exportación son temporales propios del job.
 - La salida se construye primero como `.delay-audio-part`; un error no debe publicar ese archivo como salida final.
 - La limpieza borra únicamente temporales creados por el job y nunca originales ni una salida ya publicada.
+- Al eliminar el último temporal también retira, si queda vacío, su directorio propio `job/tmp` o `job/fps`; no toca otros directorios.
 - Si un temporal propio no puede eliminarse, se registra como error técnico; no se oculta.
 
 ## Caja negra

@@ -223,6 +223,64 @@ class HybridResultContractTests(unittest.TestCase):
 
 
 class HybridExportGateTests(unittest.TestCase):
+    def test_cleanup_removes_only_empty_owned_temp_directories(self):
+        runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
+        os.makedirs(runtime_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="cleanup-owned-", dir=runtime_root) as job_dir:
+            owned = os.path.join(job_dir, "tmp")
+            other = os.path.join(job_dir, "other")
+            os.makedirs(owned)
+            os.makedirs(other)
+            owned_file = os.path.join(owned, "audio.mka")
+            other_file = os.path.join(other, "keep-parent.mka")
+            with open(owned_file, "w", encoding="utf-8") as handle:
+                handle.write("owned")
+            with open(other_file, "w", encoding="utf-8") as handle:
+                handle.write("other")
+            with (
+                patch.object(routes, "diagnostico_event"),
+                patch.object(routes, "diagnostico_error"),
+            ):
+                owned_outcome = routes.limpiar_temporal_diagnosticado(
+                    {"job_dir": job_dir}, owned_file, "export_audio"
+                )
+                other_outcome = routes.limpiar_temporal_diagnosticado(
+                    {"job_dir": job_dir}, other_file, "export_audio"
+                )
+            self.assertFalse(os.path.exists(owned_file))
+            self.assertFalse(os.path.exists(owned))
+            self.assertTrue(owned_outcome["directory_removed"])
+            self.assertFalse(owned_outcome["remaining"])
+            self.assertFalse(os.path.exists(other_file))
+            self.assertTrue(os.path.isdir(other))
+            self.assertFalse(other_outcome["directory_removed"])
+
+    def test_cleanup_waits_for_last_owned_temp_before_removing_directory(self):
+        runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
+        os.makedirs(runtime_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="cleanup-multiple-", dir=runtime_root) as job_dir:
+            owned = os.path.join(job_dir, "fps")
+            os.makedirs(owned)
+            first = os.path.join(owned, "first.mka")
+            second = os.path.join(owned, "second.mka")
+            for path in (first, second):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("temp")
+            with (
+                patch.object(routes, "diagnostico_event"),
+                patch.object(routes, "diagnostico_error"),
+            ):
+                first_outcome = routes.limpiar_temporal_diagnosticado(
+                    {"job_dir": job_dir}, first, "fps_audio"
+                )
+                second_outcome = routes.limpiar_temporal_diagnosticado(
+                    {"job_dir": job_dir}, second, "fps_audio"
+                )
+            self.assertFalse(os.path.isdir(owned))
+            self.assertFalse(first_outcome["directory_removed"])
+            self.assertTrue(second_outcome["directory_removed"])
+            self.assertFalse(second_outcome["remaining"])
+
     def test_api_job_converts_real_motor_failure_to_one_blocked_technical_closure(self):
         runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
         os.makedirs(runtime_root, exist_ok=True)
