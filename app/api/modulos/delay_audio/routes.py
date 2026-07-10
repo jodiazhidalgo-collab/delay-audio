@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import select
@@ -68,6 +69,25 @@ ROOT_BUTTON_ORDER = ("media", "data")
 _JOBS = {}
 _LOCK = threading.Lock()
 DUPLICATE_JOB_GRACE_SEC = 30
+HYBRID_FINAL_STATES = frozenset({
+    "OK_VERIFICADO",
+    "NO_FIABLE",
+    "MONTAJE_DISTINTO",
+    "FPS_NO_CONFIRMADOS",
+    "SIN_ZONAS_VALIDAS",
+    "AUDIO_VIDEO_ORIGEN_DUDOSO",
+    "ERROR_TECNICO",
+})
+HYBRID_RESULT_FIELDS = frozenset({
+    "state",
+    "export_allowed",
+    "delay_ms",
+    "confidence",
+    "fps_correction",
+    "visual",
+    "audio",
+    "decision",
+})
 
 
 def hybrid_enabled(config=None):
@@ -76,13 +96,212 @@ def hybrid_enabled(config=None):
     return hybrid.get("enabled") is True
 
 
-def job_activo_misma_salida(ref, esp, ref_audio, esp_audio, output_dir, delay_hint_ms=0):
+def _finite_number(value):
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _hybrid_ok_evidence(confidence, fps_correction, visual, audio, contradictions):
+    supporting_zones = audio.get("supporting_zones") if isinstance(audio, dict) else None
+    fps_safe = isinstance(fps_correction, dict)
+    for key in ("planned", "confirmed", "applied"):
+        if key in fps_correction and not isinstance(fps_correction.get(key), bool):
+            fps_safe = False
+    if fps_correction.get("planned") is True:
+        fps_safe = fps_safe and fps_correction.get("confirmed") is True and fps_correction.get("applied") is True
+    elif fps_correction.get("confirmed") is True or fps_correction.get("applied") is True:
+        fps_safe = False
+    return bool(
+        confidence == "ALTA"
+        and isinstance(visual, dict)
+        and visual.get("verified") is True
+        and isinstance(supporting_zones, int)
+        and not isinstance(supporting_zones, bool)
+        and supporting_zones >= 2
+        and isinstance(contradictions, list)
+        and not contradictions
+        and fps_safe
+    )
+
+
+def construir_resultado_hibrido(
+    state,
+    delay_ms=0,
+    confidence="BAJA",
+    fps_correction=None,
+    visual=None,
+    audio=None,
+    reason="",
+    contradictions=None,
+    **extra,
+):
+    fps_correction = dict(fps_correction or {})
+    visual = dict(visual or {})
+    audio = dict(audio or {})
+    contradictions = list(contradictions or [])
+    if state not in HYBRID_FINAL_STATES:
+        state = "ERROR_TECNICO"
+        reason = reason or "estado_hibrido_desconocido"
+        contradictions.append("unknown_final_state")
+    if state == "OK_VERIFICADO" and not _hybrid_ok_evidence(
+        confidence,
+        fps_correction,
+        visual,
+        audio,
+        contradictions,
+    ):
+        state = "NO_FIABLE"
+        reason = reason or "evidencia_insuficiente_para_autorizar"
+        if "insufficient_verified_evidence" not in contradictions:
+            contradictions.append("insufficient_verified_evidence")
+    data = {
+        "ok": state != "ERROR_TECNICO",
+        "state": state,
+        "export_allowed": state == "OK_VERIFICADO",
+        "delay_ms": float(delay_ms) if _finite_number(delay_ms) else 0,
+        "confidence": confidence if isinstance(confidence, str) else "BAJA",
+        "fps_correction": fps_correction,
+        "visual": visual,
+        "audio": audio,
+        "decision": {
+            "reason": str(reason or ""),
+            "contradictions": contradictions,
+        },
+    }
+    for key, value in extra.items():
+        if key not in HYBRID_RESULT_FIELDS and key != "ok":
+            data[key] = value
+    return data
+
+
+def contrato_resultado_hibrido_valido(result):
+    if not isinstance(result, dict) or not HYBRID_RESULT_FIELDS.issubset(result):
+        return False
+    state = result.get("state")
+    if state not in HYBRID_FINAL_STATES or not isinstance(result.get("export_allowed"), bool):
+        return False
+    if not _finite_number(result.get("delay_ms")) or not isinstance(result.get("confidence"), str):
+        return False
+    if not all(isinstance(result.get(key), dict) for key in ("fps_correction", "visual", "audio", "decision")):
+        return False
+    decision = result["decision"]
+    if not isinstance(decision.get("reason"), str) or not isinstance(decision.get("contradictions"), list):
+        return False
+    if state != "OK_VERIFICADO":
+        return result.get("export_allowed") is False
+    return bool(
+        result.get("export_allowed") is True
+        and _hybrid_ok_evidence(
+            result.get("confidence"),
+            result.get("fps_correction"),
+            result.get("visual"),
+            result.get("audio"),
+            decision.get("contradictions"),
+        )
+    )
+
+
+def exportacion_hibrida_autorizada(result):
+    return bool(
+        contrato_resultado_hibrido_valido(result)
+        and result.get("state") == "OK_VERIFICADO"
+        and result.get("export_allowed") is True
+    )
+
+
+def exportacion_legacy_autorizada(result, config):
+    return bool(
+        isinstance(result, dict)
+        and result.get("ok")
+        and confianza_valida(result.get("confidence", "BAJA"), config.get("confianza_minima", "MEDIA"))
+    )
+
+
+def resultado_hibrido_desde_legacy(result, job, profile):
+    audio = {
+        "legacy": True,
+        "supporting_zones": int(result.get("zones_count") or 0),
+        "avg_score": result.get("avg_score"),
+    }
+    data = construir_resultado_hibrido(
+        "NO_FIABLE",
+        delay_ms=result.get("delay_ms", 0),
+        confidence=result.get("confidence", "BAJA"),
+        fps_correction=result.get("fps_correction") or job.get("fps_correction") or {},
+        visual={},
+        audio=audio,
+        reason="resultado_legacy_sin_verificacion_hibrida",
+        contradictions=["legacy_result_not_verified"],
+        profile=result.get("profile") or profile,
+    )
+    for key in ("zones_count", "avg_score", "results", "csv_path", "log_path", "ref_stream", "esp_stream"):
+        if key in result:
+            data[key] = result[key]
+    return data
+
+
+def resultado_legacy_valido_para_puente(result):
+    required = {"ok", "delay_ms", "confidence", "zones_count", "avg_score", "results", "profile"}
+    if not isinstance(result, dict) or not required.issubset(result):
+        return False
+    zones_count = result.get("zones_count")
+    return bool(
+        result.get("ok") is True
+        and _finite_number(result.get("delay_ms"))
+        and _finite_number(result.get("avg_score"))
+        and result.get("confidence") in {"ALTA", "MEDIA", "BAJA"}
+        and isinstance(zones_count, int)
+        and not isinstance(zones_count, bool)
+        and zones_count >= 0
+        and isinstance(result.get("results"), list)
+        and result.get("profile") in {"pelicula", "trailer"}
+    )
+
+
+def resultado_error_tecnico(job, profile, reason, detail=""):
+    return construir_resultado_hibrido(
+        "ERROR_TECNICO",
+        fps_correction=job.get("fps_correction") or {},
+        reason=reason or "error_tecnico",
+        contradictions=["technical_error"],
+        profile=profile,
+        error=str(detail or reason or "Error técnico"),
+        log_path=job.get("log_path"),
+        csv_path=job.get("csv_path"),
+    )
+
+
+def normalizar_resultado_hibrido(job, profile):
+    result = leer_json(job["result_path"])
+    if contrato_resultado_hibrido_valido(result):
+        return result
+    if isinstance(result, dict) and result.get("state") is None and resultado_legacy_valido_para_puente(result):
+        normalized = resultado_hibrido_desde_legacy(result, job, profile)
+    else:
+        detail = result.get("error") if isinstance(result, dict) else "Resultado ausente o inválido"
+        normalized = resultado_error_tecnico(job, profile, "contrato_resultado_invalido", detail)
+    escribir_json(job["result_path"], normalized)
+    return normalized
+
+
+def status_para_resultado(result, fallback="done"):
+    if not isinstance(result, dict):
+        return fallback
+    if result.get("state") in HYBRID_FINAL_STATES:
+        if fallback == "running" and result.get("state") != "ERROR_TECNICO":
+            return "running"
+        return "error" if result.get("state") == "ERROR_TECNICO" else "done"
+    return "error" if not result.get("ok", False) else fallback
+
+
+def job_activo_misma_salida(ref, esp, ref_audio, esp_audio, output_dir, delay_hint_ms=0, requested_mode=""):
     now = time.time()
     delay_hint_ms = int(delay_hint_ms or 0)
     for job in _JOBS.values():
         is_running = job.get("status") == "running"
         is_recent = now - float(job.get("created") or 0) <= DUPLICATE_JOB_GRACE_SEC
         if not is_running and not is_recent:
+            continue
+        if requested_mode and job.get("requested_mode", requested_mode) != requested_mode:
             continue
         same_hint = int(job.get("delay_hint_ms") or 0) == delay_hint_ms
         if job.get("esp") == esp and job.get("output_dir") == output_dir and (is_running or same_hint):
@@ -452,10 +671,19 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
         return {"ok": False, "error": error}
 
     cfg = leer_config()
+    requested_mode = limpiar_opcion(cfg.get("modo", DEFAULT_CONFIG["modo"]), {"medir", "exportar"}, DEFAULT_CONFIG["modo"])
     output_dir = normalizar_ruta(cfg.get("carpeta_salida") or DEFAULT_CONFIG["carpeta_salida"])
     fps_correction = planificar_correccion_fps(ref, esp)
     with _LOCK:
-        existing = job_activo_misma_salida(ref, esp, ref_audio, esp_audio, output_dir, delay_hint_ms)
+        existing = job_activo_misma_salida(
+            ref,
+            esp,
+            ref_audio,
+            esp_audio,
+            output_dir,
+            delay_hint_ms,
+            requested_mode,
+        )
         if existing:
             diagnostico_event(existing, "duplicate_guard", "reused", "Peticion duplicada: se reutiliza el job activo", {
                 "existing_job": existing.get("id"),
@@ -486,6 +714,7 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
             "esp_audio": esp_audio,
             "delay_hint_ms": delay_hint_ms,
             "output_dir": output_dir,
+            "requested_mode": requested_mode,
             "job_dir": job_dir,
             "log_path": os.path.join(job_dir, "MEDIR_DELAY_AUDIO_LOG.txt"),
             "csv_path": os.path.join(job_dir, "MEDIR_DELAY_AUDIO_RESULTADOS.csv"),
@@ -503,7 +732,7 @@ def iniciar(ref, esp, ref_audio="", esp_audio="", delay_hint_ms=0):
         "ref_audio": ref_audio,
         "esp_audio": esp_audio,
     }, settings={
-        "modo": cfg.get("modo"),
+        "modo": requested_mode,
         "perfil": cfg.get("perfil"),
         "confianza_minima": cfg.get("confianza_minima"),
         "carpeta_salida": output_dir,
@@ -592,17 +821,23 @@ def _ejecutar_job(job):
         if rc == 0:
             diagnostico_event(job, "measure_setup", "finished", "Motor de medicion terminado OK", {"returncode": rc})
             anexar_correccion_fps_resultado(job)
+            if job.get("hybrid_enabled"):
+                normalizar_resultado_hibrido(job, profile)
             exportar_si_corresponde(job)
             job["status"] = "done"
             diagnostico_finish(job, "done", leer_json(job["result_path"]) or {})
         else:
             job["status"] = "error"
             message = "El motor de medicion termino con error."
+            if job.get("hybrid_enabled"):
+                escribir_json(job["result_path"], resultado_error_tecnico(job, profile, "motor_medicion_fallido", message))
             diagnostico_error(job, "MEASURE_FAILED", "measure_setup", message, {"returncode": rc, "stdout_log": stdout_path})
             diagnostico_finish(job, "error", leer_json(job["result_path"]) or {})
     except Exception as exc:
         job["status"] = "error"
         job["error"] = str(exc)
+        if job.get("hybrid_enabled"):
+            escribir_json(job["result_path"], resultado_error_tecnico(job, profile, "error_tecnico_job", str(exc)))
         diagnostico_error(job, diag_classify_error(str(exc)), "api_job", str(exc), {"returncode": job.get("returncode")}, exc)
         diagnostico_finish(job, "error", leer_json(job["result_path"]) or {})
         try:
@@ -685,30 +920,25 @@ def confirmar_plan_fps(job, fps_plan, profile):
 
 
 def resultado_fps_no_confirmados(job, fps_correction, profile):
-    return {
-        "ok": False,
-        "state": "FPS_NO_CONFIRMADOS",
-        "export_allowed": False,
-        "delay_ms": 0,
-        "confidence": "BAJA",
-        "profile": profile,
-        "fps_correction": fps_correction,
-        "visual": fps_correction.get("visual") or {},
-        "audio": {},
-        "decision": {
-            "reason": fps_correction.get("reason") or "fps_no_confirmados",
-            "contradictions": ["fps_plan_not_confirmed"],
-        },
-        "log_path": job.get("log_path"),
-        "csv_path": job.get("csv_path"),
-    }
+    return construir_resultado_hibrido(
+        "FPS_NO_CONFIRMADOS",
+        fps_correction=fps_correction,
+        visual=fps_correction.get("visual") or {},
+        audio={},
+        reason=fps_correction.get("reason") or "fps_no_confirmados",
+        contradictions=["fps_plan_not_confirmed"],
+        profile=profile,
+        log_path=job.get("log_path"),
+        csv_path=job.get("csv_path"),
+    )
 
 
 def exportar_si_corresponde(job):
     diagnostico_attach(job)
     cfg = leer_config()
-    if cfg.get("modo") != "exportar":
-        diagnostico_event(job, "export_prepare", "skipped", "Modo exportar desactivado", {"modo": cfg.get("modo")})
+    requested_mode = job.get("requested_mode") or cfg.get("modo")
+    if requested_mode != "exportar":
+        diagnostico_event(job, "export_prepare", "skipped", "Modo exportar desactivado", {"modo": requested_mode})
         return
 
     result = leer_json(job["result_path"]) or {}
@@ -717,14 +947,36 @@ def exportar_si_corresponde(job):
         "confidence": result.get("confidence"),
         "delay_ms": result.get("delay_ms"),
     })
-    if not result.get("ok"):
+    if job.get("hybrid_enabled"):
+        if not exportacion_hibrida_autorizada(result):
+            state = result.get("state") if isinstance(result, dict) else None
+            log_job(job, f"EXPORTACION: bloqueada por contrato hibrido ({state or 'resultado_invalido'}).")
+            diagnostico_event(job, "export_gate", "blocked", "Exportacion bloqueada por contrato hibrido", {
+                "state": state,
+                "export_allowed": result.get("export_allowed") if isinstance(result, dict) else None,
+                "contract_valid": contrato_resultado_hibrido_valido(result),
+            }, level="error")
+            if isinstance(result, dict):
+                result["export"] = {
+                    "ok": False,
+                    "status": "skipped",
+                    "reason": "hybrid_export_gate_blocked",
+                }
+                escribir_json(job["result_path"], result)
+            escribir_progreso(job, "done", 100, "Bloqueado")
+            return
+        diagnostico_event(job, "export_gate", "authorized", "Exportacion autorizada por contrato hibrido", {
+            "state": result.get("state"),
+            "export_allowed": result.get("export_allowed"),
+        })
+    elif not result.get("ok"):
         log_job(job, "EXPORTACION: no se exporta porque la medicion no termino OK.")
         diagnostico_event(job, "export_prepare", "skipped", "No se exporta porque la medicion no termino OK")
         escribir_progreso(job, "done", 100, "Listo")
         return
 
     confidence = result.get("confidence", "BAJA")
-    if not confianza_valida(confidence, cfg.get("confianza_minima", "MEDIA")):
+    if not job.get("hybrid_enabled") and not exportacion_legacy_autorizada(result, cfg):
         log_job(job, f"EXPORTACION: no se exporta. Confianza {confidence}, minimo {cfg.get('confianza_minima')}.")
         diagnostico_error(job, "LOW_CONFIDENCE", "export_prepare", "Confianza insuficiente para exportar", {
             "confidence": confidence,
@@ -896,8 +1148,8 @@ def estado(job_id):
     result = leer_json(job["result_path"])
     rows = leer_csv(job["csv_path"])
     status = job.get("status", "done" if result else "running")
-    if result and not result.get("ok", False):
-        status = "error"
+    if result:
+        status = status_para_resultado(result, status)
     progress = leer_progreso(job, status, rows, result)
     return {
         "ok": True,

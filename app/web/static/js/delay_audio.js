@@ -1102,9 +1102,65 @@ function cleanWorkshopDelay(value) {
   return `${text || "0"} ms`;
 }
 
+function hybridWorkshopResultInfo(result) {
+  const state = String(result?.state || "").trim();
+  if (!state) return null;
+  const states = {
+    OK_VERIFICADO: {
+      title: "Verificado",
+      message: "Audio e imagen coinciden con evidencia suficiente.",
+      verified: true,
+      technical: false
+    },
+    NO_FIABLE: {
+      title: "No fiable",
+      message: "La medición no reúne evidencia suficiente.",
+      verified: false,
+      technical: false
+    },
+    MONTAJE_DISTINTO: {
+      title: "Montaje distinto",
+      message: "Los vídeos parecen corresponder a montajes diferentes.",
+      verified: false,
+      technical: false
+    },
+    FPS_NO_CONFIRMADOS: {
+      title: "FPS no confirmados",
+      message: "No se ha confirmado una corrección de velocidad segura.",
+      verified: false,
+      technical: false
+    },
+    SIN_ZONAS_VALIDAS: {
+      title: "Sin zonas válidas",
+      message: "No hay zonas útiles suficientes para verificar el delay.",
+      verified: false,
+      technical: false
+    },
+    AUDIO_VIDEO_ORIGEN_DUDOSO: {
+      title: "Origen dudoso",
+      message: "Audio e imagen no aportan una referencia común segura.",
+      verified: false,
+      technical: false
+    },
+    ERROR_TECNICO: {
+      title: "Error técnico",
+      message: "La medición no pudo completarse correctamente.",
+      verified: false,
+      technical: true
+    }
+  };
+  return states[state] || {
+    title: "Resultado no reconocido",
+    message: "El resultado no cumple el contrato del motor.",
+    verified: false,
+    technical: true
+  };
+}
+
 function workshopProgressInfo(state) {
   const progress = state.progress || null;
   const result = state.result || null;
+  const hybridInfo = hybridWorkshopResultInfo(result);
   const rows = Array.isArray(state.rows) ? state.rows : [];
   let phase = String(progress?.phase || "").toLowerCase();
   if (!phase && state.status === "running" && result?.export?.status === "running") phase = "export";
@@ -1114,6 +1170,9 @@ function workshopProgressInfo(state) {
     if (state.status === "running") {
       phase = phase || "measure";
       percent = Math.min(95, rows.length * 10);
+    } else if (hybridInfo) {
+      phase = hybridInfo.technical ? "error" : "done";
+      percent = 100;
     } else if (result?.ok) {
       phase = "done";
       percent = 100;
@@ -1196,6 +1255,7 @@ function renderWorkshopLiveMarker(state) {
   const rows = Array.isArray(state.rows) ? state.rows : [];
   const lastRow = rows.length ? rows[rows.length - 1] : null;
   const result = state.result || null;
+  const hybridInfo = hybridWorkshopResultInfo(result);
   let phase = "running";
   let status = lastRow ? "Midiendo" : "Arrancando";
   let zone = "--";
@@ -1204,7 +1264,10 @@ function renderWorkshopLiveMarker(state) {
   let valuesClass = "";
   let valuesHtml = "";
 
-  if (result?.ok) {
+  if (hybridInfo) {
+    phase = hybridInfo.technical ? "error" : "done";
+    status = hybridInfo.title;
+  } else if (result?.ok) {
     phase = "done";
     status = "Resultado";
     delay = cleanWorkshopDelay(result.delay_ms);
@@ -1237,6 +1300,7 @@ function renderWorkshopLiveMarker(state) {
 
 function renderWorkshopResult(state) {
   const result = state.result || null;
+  const hybridInfo = hybridWorkshopResultInfo(result);
   const rows = Array.isArray(state.rows) ? state.rows : [];
   if (state.status === "running") {
     return `
@@ -1244,6 +1308,37 @@ function renderWorkshopResult(state) {
         <div class="workshop-kicker">Resultado</div>
         <h2>Midiendo...</h2>
         <p>Zonas analizadas: ${rows.length}</p>
+        ${renderWorkshopRows(rows)}
+      </section>
+    `;
+  }
+  if (hybridInfo?.verified) {
+    const exportData = result.export || null;
+    const zonesCount = result.audio?.supporting_zones ?? result.zones_count ?? 0;
+    return `
+      <section class="workshop-result">
+        <div class="workshop-kicker">Resultado</div>
+        <h2>${escapeHtml(hybridInfo.title)}</h2>
+        <div class="workshop-final">
+          <strong>${escapeHtml(result.delay_ms)} ms</strong>
+          <span>${escapeHtml(result.confidence || "")}</span>
+        </div>
+        <p>${escapeHtml(zonesCount)} zonas de audio confirmadas</p>
+        ${exportData?.status === "done" ? `<p class="workshop-ok">Exportado: ${escapeHtml(exportData.path || "")}</p>` : ""}
+        ${exportData?.status === "running" ? `<p>Exportando vídeo final...</p>` : ""}
+        ${exportData?.status === "skipped" ? `<p>No exportado.</p>` : ""}
+        ${exportData?.status === "error" ? `<p class="workshop-error">Exportación fallida.</p>` : ""}
+        ${renderWorkshopRows(rows)}
+      </section>
+    `;
+  }
+  if (hybridInfo) {
+    return `
+      <section class="workshop-result">
+        <div class="workshop-kicker">Resultado</div>
+        <h2>${escapeHtml(hybridInfo.title)}</h2>
+        <p class="workshop-error">${escapeHtml(hybridInfo.message)}</p>
+        <p>No se ha autorizado ninguna exportación.</p>
         ${renderWorkshopRows(rows)}
       </section>
     `;
@@ -3648,7 +3743,10 @@ async function pollWorkshopJob() {
 
     if (data.status !== "running") {
       stopWorkshopPolling();
-      statusText.textContent = data.result?.ok ? "Taller terminado" : "Taller con aviso";
+      const hybridInfo = hybridWorkshopResultInfo(data.result);
+      statusText.textContent = hybridInfo
+        ? (hybridInfo.verified ? "Taller verificado" : hybridInfo.technical ? "Taller con error" : "Taller bloqueado por seguridad")
+        : data.result?.ok ? "Taller terminado" : "Taller con aviso";
       if (nextState.soundJob && !nextState.soundDone) {
         nextState.soundDone = true;
         saveWorkshopState(nextState);

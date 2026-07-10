@@ -34,7 +34,7 @@ class RouteSeparationTests(unittest.TestCase):
         job = {"log_path": "/logs/job/log.txt", "csv_path": "/logs/job/result.csv"}
         fps = {"planned": True, "confirmed": False, "reason": "imagen_no_confirma_tempo"}
         result = resultado_fps_no_confirmados(job, fps, "pelicula")
-        self.assertFalse(result["ok"])
+        self.assertTrue(result["ok"])
         self.assertFalse(result["export_allowed"])
         self.assertEqual(result["state"], "FPS_NO_CONFIRMADOS")
 
