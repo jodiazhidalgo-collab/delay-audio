@@ -2,10 +2,18 @@ $ErrorActionPreference = "Stop"
 
 $remote = @'
 set -e
-cd /volume1/docker/web
-sudo env BUILDX_GIT_INFO=false docker compose up -d --build delay-audio
+compose_file='/volume1/docker/delay audio/docker-compose.yaml'
+sudo docker compose -f "$compose_file" --project-name delayaudio config -q
+sudo env BUILDX_GIT_INFO=false docker compose -f "$compose_file" --project-name delayaudio up -d --build delay-audio
 echo "--- docker ps ---"
 sudo docker ps --filter 'name=^/delay-audio$' --format '{{.Names}} {{.Status}} {{.Ports}}'
+echo "--- compose ---"
+project="$(sudo docker inspect delay-audio --format '{{ index .Config.Labels "com.docker.compose.project" }}')"
+if [ "$project" != "delayaudio" ]; then
+  echo "Proyecto Compose inesperado: $project"
+  exit 1
+fi
+echo "Proyecto Compose: $project"
 echo "--- http ---"
 err_file="$(mktemp)"
 ok=0
@@ -39,6 +47,7 @@ if [ "$ok" -ne 1 ]; then
   exit 1
 fi
 rm -f "$err_file"
+# end
 '@
 
 $remote = $remote -replace "`r", ""

@@ -1,0 +1,35 @@
+name: delayaudio
+
+services:
+  delay-audio:
+    build:
+      context: ./app/motor
+      dockerfile: Dockerfile
+    image: delay-audio/motor-python:latest
+    container_name: delay-audio
+    user: "1000:10"
+    group_add:
+      - "121"
+    restart: unless-stopped
+    ports:
+      - "9004:9004"
+    env_file:
+      - ./.env
+    command:
+      - python
+      - /app/app.py
+    volumes:
+      - ./app/web:/app:ro
+      - ./app/api:/apiroot/api:ro
+      - ./app/motor:/motor:ro
+      - ./logs:/logs:rw
+      - ./config:/config:rw
+      - /volume1/docker/buscador-rd/config/btdigg-rd/data:/btdigg-rd-data:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /volume1/UGREEN/data/media/media_automatizacion:/taller:rw
+      - /volume1/UGREEN/data/media:/media:rw
+      - /volume1/UGREEN/data:/volume1/UGREEN/data:rw
+
+networks:
+  default:
+    name: delayaudio_default

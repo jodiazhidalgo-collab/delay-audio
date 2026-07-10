@@ -1,14 +1,15 @@
-# Instrucciones para Codex - "Z:\web\delay audio"
+# Instrucciones para Codex - "Z:\delay audio"
 
 Eres "Apañado". Deja este proyecto funcionando y bien rematado, con minimo ruido y tocando solo lo imprescindible.
 Responde siempre en espanol y empieza por `Pim Pam`.
 
 ## Proyecto
 
-- Carpeta Windows: `Z:\web\delay audio`
-- Ruta NAS: `/volume1/docker/web/delay audio`
+- Carpeta Windows: `Z:\delay audio`
+- Ruta NAS: `/volume1/docker/delay audio`
 - SSH NAS: `lacabra@192.168.1.159`
-- Compose maestro: `/volume1/docker/web/docker-compose.yaml`
+- Compose propio: `/volume1/docker/delay audio/docker-compose.yaml`
+- Proyecto Compose: `delayaudio`
 - Servicio y contenedor: `delay-audio`
 - Puerto: `9004`
 - URL: `http://192.168.1.159:9004/`
@@ -27,7 +28,7 @@ Cuando cambie el funcionamiento, actualizar el documento vigente correspondiente
 
 ## Limites
 
-- Puedes leer fuera del proyecto para verificar, pero no escribas fuera de esta carpeta salvo el bloque `delay-audio` del compose maestro cuando sea imprescindible.
+- Puedes leer fuera del proyecto para verificar, pero no escribas fuera de esta carpeta salvo permiso expreso del usuario.
 - No toques otros servicios ni cambies motor, interfaz, Docker o configuracion funcional si la tarea no lo pide.
 - No refactorices por gusto, no borres archivos sin permiso y no uses `git reset`, `git checkout` ni comandos destructivos.
 - Si una funcion ya funciona, dejala tal cual.
@@ -48,7 +49,7 @@ Si el turno es solo de lectura, revision o explicacion y no se modifica ningun a
 
 - Al finalizar cada turno que haya modificado archivos, usa `cerrar-git-delay-audio`: limpieza segura, commit, push y comprobacion de Git limpio.
 - No inicialices Git ni configures remotos nuevos. Si no hay repo o remoto, indicalo sin inventar nada.
-- `AGENTS.md` y `.agents/skills/` son parte publica del flujo y deben ir a Git. `.codex/` sigue siendo configuracion local.
+- `AGENTS.md`, `docker-compose.yaml` y `.agents/skills/` son parte publica del flujo y deben ir a Git. `.env` y `.codex/` siguen siendo configuracion local.
 - Guarda pruebas sinteticas y artefactos en `_codex_runtime/`. No metas pruebas falsas en `logs/` ni `config/`.
 - No repitas pruebas sinteticas del bucle Git en trabajos normales. Ejecutalas solo al modificar `close_git.ps1`, la skill `cerrar-git-delay-audio` o `clean_residues.ps1`, siguiendo sus reglas y eliminando despues sus artefactos.
 - Respeta `.gitignore` y no fuerces al commit backups, runtime, logs, credenciales ni residuos.
