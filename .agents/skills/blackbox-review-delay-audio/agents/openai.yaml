@@ -1,0 +1,4 @@
+interface:
+  display_name: "Blackbox delay audio"
+  short_description: "Leer diagnosticos y caja negra de delay audio"
+  default_prompt: "Usa esta skill para revisar el area y job afectados de delay audio."

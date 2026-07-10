@@ -1,0 +1,4 @@
+interface:
+  display_name: "UI Check delay audio"
+  short_description: "Validar visualmente delay audio en navegador"
+  default_prompt: "Usa esta skill para comprobar la UI visible de delay audio."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rebuild delay audio"
+  short_description: "Reconstruir y comprobar el servicio delay-audio"
+  default_prompt: "Usa esta skill tras cambios web, backend, frontend, Docker o configuracion de delay audio."

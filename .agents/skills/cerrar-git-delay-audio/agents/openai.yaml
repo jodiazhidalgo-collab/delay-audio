@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cerrar Git delay audio"
+  short_description: "Limpiar, commit, push y verificar Git limpio"
+  default_prompt: "Usa esta skill al finalizar el turno de trabajo en delay audio."

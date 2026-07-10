@@ -1,0 +1,4 @@
+interface:
+  display_name: "Limpiar residuos delay audio"
+  short_description: "Limpiar basura segura y pruebas sinteticas de Codex"
+  default_prompt: "Usa esta skill dentro del cierre final de delay audio."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Backup delay audio"
+  short_description: "Crear backup fechado del proyecto delay audio"
+  default_prompt: "Usa esta skill antes de tocar zonas delicadas de delay audio."

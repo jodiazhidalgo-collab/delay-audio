@@ -1,9 +1,10 @@
 # Git local para delay audio: no subir runtime, backups ni residuos.
 
 _backups/
-.agents/
+.agents/*
+!.agents/skills/
+!.agents/skills/**
 .codex/
-AGENTS.md
 .playwright-mcp/
 _codex_runtime/
 logs/
