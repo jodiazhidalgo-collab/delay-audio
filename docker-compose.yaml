@@ -1,4 +1,4 @@
-name: delayaudio
+name: delay-audio
 
 services:
   delay-audio:
@@ -32,4 +32,4 @@ services:
 
 networks:
   default:
-    name: delayaudio_default
+    name: delay-audio_default
