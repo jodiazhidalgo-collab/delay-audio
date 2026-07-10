@@ -8,6 +8,7 @@ import unittest
 import uuid
 import wave
 from array import array
+from unittest import mock
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -18,6 +19,7 @@ for path in (APP_ROOT, MOTOR_ROOT):
         sys.path.insert(0, path)
 
 from api.modulos.delay_audio.routes import contrato_resultado_hibrido_valido  # noqa: E402
+import diagnostico_job  # noqa: E402
 from medir_delay_audio import DelayAudio  # noqa: E402
 
 
@@ -141,6 +143,36 @@ class DeterministicDiscoveryMotor(DelayAudio):
             "search_min_ms": -45000,
             "search_max_ms": 45000,
         }
+
+
+class AtomicDiagnosticWriteTests(unittest.TestCase):
+    def test_transient_smb_replace_lock_is_retried_without_leaving_temp_files(self):
+        runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
+        os.makedirs(runtime_root, exist_ok=True)
+        job_dir = os.path.join(runtime_root, f"phase5-atomic-{uuid.uuid4().hex}")
+        path = os.path.join(job_dir, "timeline.json")
+        real_replace = os.replace
+        calls = []
+
+        def flaky_replace(source, destination):
+            calls.append((source, destination))
+            if len(calls) < 3:
+                raise PermissionError("bloqueo SMB transitorio")
+            return real_replace(source, destination)
+
+        try:
+            with mock.patch.object(diagnostico_job.os, "replace", side_effect=flaky_replace), mock.patch.object(
+                diagnostico_job.time, "sleep"
+            ) as sleep:
+                diagnostico_job._write_json(path, {"ok": True})
+
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), {"ok": True})
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(sleep.call_count, 2)
+            self.assertFalse([name for name in os.listdir(job_dir) if name.endswith(".tmp")])
+        finally:
+            shutil.rmtree(job_dir, ignore_errors=True)
 
 
 class HybridDiscoveryTests(unittest.TestCase):
