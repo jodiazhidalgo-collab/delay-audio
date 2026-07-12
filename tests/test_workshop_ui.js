@@ -313,6 +313,9 @@ async function main() {
       profile: "trailer",
       delay_hint_ms: 2000,
       window_sec: 4,
+      spanish_preview_duration_sec: 20,
+      spanish_neutral_offset_sec: 8,
+      relative_min_offset_ms: -8000,
       relative_max_offset_ms: 8000,
       max_offset_ms: 60000
     });
@@ -326,11 +329,19 @@ async function main() {
   assert.match(previewHtml, /workshop-preview-lane is-esp/);
   assert.equal((previewHtml.match(/workshop-preview-lane/g) || []).length, 1);
   assert.doesNotMatch(previewHtml, /workshop-preview-lane is-ref|<span>Bueno<\/span>|<span>Español<\/span>/);
-  const mappedPreviewTimes = JSON.parse(harness.evaluate(`JSON.stringify((() => {
-    workshopPreviewHintMs = 5000;
-    return workshopPreviewTargetTimes(0);
+  const initialPreviewTimes = JSON.parse(harness.evaluate("JSON.stringify(workshopPreviewTargetTimes(0))"));
+  assert.deepEqual(initialPreviewTimes, { ref: 0, esp: 8 });
+  const plusPreview = JSON.parse(harness.evaluate(`JSON.stringify((() => {
+    adjustWorkshopPreviewHint(1000);
+    return { hint: workshopPreviewHintMs, times: workshopPreviewTargetTimes(0) };
   })())`));
-  assert.deepEqual(mappedPreviewTimes, { ref: 3, esp: 0 });
+  assert.deepEqual(plusPreview, { hint: 1000, times: { ref: 0, esp: 9 } });
+  const minusPreview = JSON.parse(harness.evaluate(`JSON.stringify((() => {
+    adjustWorkshopPreviewHint(-2000);
+    return { hint: workshopPreviewHintMs, times: workshopPreviewTargetTimes(0) };
+  })())`));
+  assert.deepEqual(minusPreview, { hint: 3000, times: { ref: 0, esp: 7 } });
+  assert.equal(harness.evaluate("formatWorkshopDelayHint(-workshopPreviewHintMs)"), "-3000 ms");
 
   console.log("workshop_ui: 10 casos OK");
 }

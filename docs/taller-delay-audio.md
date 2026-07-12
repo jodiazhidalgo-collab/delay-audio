@@ -19,8 +19,9 @@ Taller crea un vídeo final con la imagen y calidad de `Video Bueno` y el audio 
 - `Película` y `Tráiler`: seleccionan el perfil de análisis.
 - Selección de pistas, `Editar`, preview, `delayHintMs` y carpeta de salida mantienen su función actual.
 - `Editar` aparece únicamente en `Audio Español`; `Video Bueno` sigue visible como referencia maestra, pero no muestra ese botón.
-- El preview conserva las dos imágenes y muestra una sola línea amarilla para el desplazamiento español. La línea no se arrastra: `-` y `+` la mueven en pasos de 1 segundo, mientras `Play` y `Aceptar` conservan su función.
-- `Editar` abre clips interiores equivalentes, no clips desde `t=0`: 30 segundos alrededor del 45 % del core para Película y 12 segundos alrededor del 40 % para Tráiler. El mapeo aplica el tempo provisional y el hint existente sin salirse de los archivos.
+- El preview conserva las dos imágenes y muestra una sola línea amarilla para el desplazamiento español. La línea no se arrastra: `-` la mueve a la izquierda y retrocede únicamente el vídeo español; `+` la mueve a la derecha y avanza únicamente el vídeo español, siempre en pasos de 1 segundo. `Video Bueno` permanece fijo incluso al cruzar por `0`.
+- `Editar` abre posiciones interiores equivalentes, no clips desde `t=0`, alrededor del 45 % del core para Película y del 40 % para Tráiler. La referencia conserva 30 segundos en Película y 12 en Tráiler; el español prepara un buffer bilateral de hasta 54 y 20 segundos respectivamente para mantener los márgenes de `±24` y `±8` sin mover la referencia. `Play` compara ventanas de 6 y 4 segundos.
+- El número visible expresa el desplazamiento del vídeo español. Al aceptar, la interfaz lo convierte al convenio interno del motor (`tiempo_español = tiempo_referencia - delay`) sin cambiar el signo real usado por medición, FPS o exportación.
 - `delayHintMs` es solo una semilla. Entra junto a `0`, puede centrar y acelerar el fast path, se abandona si no converge y nunca autoriza por sí solo. La medición final registra si ayudó, fue descartado y su error frente al resultado.
 - El botón solo muestra `Ayuda recomendada` o `Ayuda muy recomendable` cuando existe un hint o resultado fiable que supera los umbrales del perfil. La diferencia total de duración puede avisarse aparte, pero no colorea `Editar` por sí sola.
 

@@ -1163,7 +1163,7 @@ def preview_visual(q):
             esp_out,
             "Audio Espanol",
             plan["spanish_clip_start_sec"],
-            plan["preview_duration_sec"],
+            plan["spanish_preview_duration_sec"],
             plan["tempo"],
         )
         manifest = {
@@ -1279,9 +1279,9 @@ def generar_preview_clip(source, target, label, start_sec=0.0, duration_sec=PREV
     log_path = os.path.join(os.path.dirname(target), "preview.log")
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {label} rc={p.returncode} elapsed={time.time() - started_at:.2f}s\n")
-        if p.stdout:
+        if p.returncode != 0 and p.stdout:
             f.write(p.stdout[-4000:] + "\n")
-        if p.stderr:
+        if p.returncode != 0 and p.stderr:
             f.write(p.stderr[-4000:] + "\n")
     if p.returncode != 0:
         raise RuntimeError(f"No pude crear preview de {label}: {(p.stderr or p.stdout or '').strip()[-500:]}")

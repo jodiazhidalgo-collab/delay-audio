@@ -971,8 +971,8 @@ function renderWorkshopDelayHint(state) {
   if (!delayHintMs) return "";
   return `
     <div class="workshop-delay-hint">
-      <span>Ayuda visual</span>
-      <strong>${escapeHtml(formatWorkshopDelayHint(delayHintMs))}</strong>
+      <span>Desplazamiento español</span>
+      <strong>${escapeHtml(formatWorkshopDelayHint(-delayHintMs))}</strong>
       <button type="button" data-workshop-preview-reset-main ${workshopJobRunning(state) ? "disabled" : ""}>0</button>
     </div>
   `;
@@ -1025,7 +1025,7 @@ function renderWorkshopPreviewModal(state) {
   if (!workshopPreviewModalOpen) return "";
   const ready = Boolean(state.ref?.path && state.esp?.path);
   const canAccept = ready && !workshopJobRunning(state) && !workshopPreviewLoading && !workshopPreviewError && workshopPreviewData?.ref_url && workshopPreviewData?.esp_url;
-  const valueText = formatWorkshopDelayHint(workshopPreviewHintMs);
+  const valueText = formatWorkshopDelayHint(-workshopPreviewHintMs);
   return `
     <div class="workshop-preview-modal is-open">
       <div class="workshop-preview-sheet" role="dialog" aria-modal="true" aria-labelledby="workshopPreviewTitle">
@@ -3594,21 +3594,19 @@ function workshopPreviewWindowSec() {
 
 function workshopPreviewCurrentBase() {
   const videos = workshopPreviewVideos();
-  const baseHintMs = Number(workshopPreviewData?.delay_hint_ms || 0);
-  const hintSec = (workshopPreviewHintMs - baseHintMs) / 1000;
-  if (!videos.ref || !videos.esp) return 0;
-  const base = hintSec >= 0 ? Number(videos.ref.currentTime || 0) - hintSec : Number(videos.ref.currentTime || 0);
+  if (!videos.ref) return 0;
+  const base = Number(videos.ref.currentTime || 0);
   return Math.max(0, Math.min(workshopPreviewWindowSec(), base));
 }
 
 function workshopPreviewTargetTimes(baseSec) {
   const base = Math.max(0, Math.min(workshopPreviewWindowSec(), Number(baseSec) || 0));
   const baseHintMs = Number(workshopPreviewData?.delay_hint_ms || 0);
-  const hintSec = (workshopPreviewHintMs - baseHintMs) / 1000;
-  if (hintSec >= 0) {
-    return { ref: base + hintSec, esp: base };
-  }
-  return { ref: base, esp: base - hintSec };
+  const baseSpanishOffsetMs = -baseHintMs;
+  const spanishOffsetMs = -workshopPreviewHintMs;
+  const relativeSpanishSec = (spanishOffsetMs - baseSpanishOffsetMs) / 1000;
+  const spanishNeutralSec = Math.max(0, Number(workshopPreviewData?.spanish_neutral_offset_sec || 0));
+  return { ref: base, esp: spanishNeutralSec + base + relativeSpanishSec };
 }
 
 function setWorkshopPreviewTime(video, seconds) {
@@ -3645,11 +3643,33 @@ function pauseWorkshopPreviewVideos() {
   updateWorkshopPreviewUi();
 }
 
-function playWorkshopPreviewVideos() {
+function waitWorkshopPreviewVideoReady(video, timeoutMs = 2500) {
+  if (!video || (!video.seeking && Number(video.readyState || 0) >= 2)) return Promise.resolve();
+  return new Promise((resolve) => {
+    let timeoutId = null;
+    const finish = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      video.removeEventListener("seeked", finish);
+      video.removeEventListener("canplay", finish);
+      resolve();
+    };
+    video.addEventListener("seeked", finish);
+    video.addEventListener("canplay", finish);
+    timeoutId = setTimeout(finish, timeoutMs);
+  });
+}
+
+async function playWorkshopPreviewVideos() {
   const videos = workshopPreviewVideos();
   if (!videos.ref || !videos.esp) return;
   setWorkshopPreviewBase(workshopPreviewCurrentBase());
   workshopPreviewPlaying = true;
+  updateWorkshopPreviewUi();
+  await Promise.all([
+    waitWorkshopPreviewVideoReady(videos.ref),
+    waitWorkshopPreviewVideoReady(videos.esp),
+  ]);
+  if (!workshopPreviewPlaying) return;
   [videos.ref, videos.esp].forEach((video) => {
     try {
       const promise = video.play();
@@ -3659,7 +3679,12 @@ function playWorkshopPreviewVideos() {
   if (workshopPreviewTimer) clearInterval(workshopPreviewTimer);
   workshopPreviewTimer = setInterval(() => {
     if (!workshopPreviewPlaying) return;
-    if (workshopPreviewCurrentBase() >= workshopPreviewWindowSec() - 0.05) {
+    const base = workshopPreviewCurrentBase();
+    const target = workshopPreviewTargetTimes(base);
+    if (!videos.esp.seeking && Math.abs(Number(videos.esp.currentTime || 0) - target.esp) > 0.18) {
+      setWorkshopPreviewTime(videos.esp, target.esp);
+    }
+    if (base >= workshopPreviewWindowSec() - 0.05) {
       pauseWorkshopPreviewVideos();
       setWorkshopPreviewBase(0);
     }
@@ -3679,10 +3704,17 @@ function adjustWorkshopPreviewHint(deltaMs) {
   if (!workshopPreviewData) return;
   const base = workshopPreviewCurrentBase();
   const max = Number(workshopPreviewData.max_offset_ms || 60000);
-  const relativeMax = Number(workshopPreviewData.relative_max_offset_ms || max);
   const baseHint = Number(workshopPreviewData.delay_hint_ms || 0);
-  const candidate = normalizeWorkshopDelayHintMs(workshopPreviewHintMs + Number(deltaMs || 0), max);
-  workshopPreviewHintMs = Math.max(baseHint - relativeMax, Math.min(baseHint + relativeMax, candidate));
+  const baseSpanishOffset = -baseHint;
+  const relativeMin = Number(workshopPreviewData.relative_min_offset_ms ?? -Number(workshopPreviewData.relative_max_offset_ms || max));
+  const relativeMax = Number(workshopPreviewData.relative_max_offset_ms || max);
+  const currentSpanishOffset = -workshopPreviewHintMs;
+  const candidateSpanishOffset = normalizeWorkshopDelayHintMs(currentSpanishOffset + Number(deltaMs || 0), max);
+  const spanishOffset = Math.max(
+    baseSpanishOffset + relativeMin,
+    Math.min(baseSpanishOffset + relativeMax, candidateSpanishOffset),
+  );
+  workshopPreviewHintMs = -spanishOffset;
   setWorkshopPreviewBase(base);
   updateWorkshopPreviewUi();
 }
@@ -3696,15 +3728,19 @@ function resetWorkshopPreviewHint() {
 
 function updateWorkshopPreviewUi() {
   const valueEl = foldersEl.querySelector("[data-workshop-preview-value]");
-  if (valueEl) valueEl.textContent = formatWorkshopDelayHint(workshopPreviewHintMs);
+  if (valueEl) valueEl.textContent = formatWorkshopDelayHint(-workshopPreviewHintMs);
   const playButton = foldersEl.querySelector("[data-workshop-preview-play]");
   if (playButton) playButton.textContent = workshopPreviewPlaying ? "Pausa" : "Play";
   const max = Number(workshopPreviewData?.max_offset_ms || 60000);
+  const visualMin = Math.min(-1000, Math.max(-max, Number(workshopPreviewData?.relative_min_offset_ms ?? -Number(workshopPreviewData?.relative_max_offset_ms || max))));
   const visualMax = Math.max(1000, Math.min(max, Number(workshopPreviewData?.relative_max_offset_ms || max)));
-  const relativeHint = workshopPreviewHintMs - Number(workshopPreviewData?.delay_hint_ms || 0);
-  const pct = visualMax > 0 ? Math.max(-44, Math.min(44, (relativeHint / visualMax) * 44)) : 0;
+  const baseSpanishOffset = -Number(workshopPreviewData?.delay_hint_ms || 0);
+  const relativeSpanishOffset = -workshopPreviewHintMs - baseSpanishOffset;
+  const pct = relativeSpanishOffset < 0
+    ? Math.max(-44, (relativeSpanishOffset / Math.abs(visualMin)) * 44)
+    : Math.min(44, (relativeSpanishOffset / visualMax) * 44);
   const ruler = foldersEl.querySelector("[data-workshop-preview-ruler]");
-  if (ruler) ruler.style.setProperty("--preview-shift", `${-pct}%`);
+  if (ruler) ruler.style.setProperty("--preview-shift", `${pct}%`);
 }
 
 function acceptWorkshopPreviewHint() {

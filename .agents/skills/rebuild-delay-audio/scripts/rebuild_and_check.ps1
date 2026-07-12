@@ -4,7 +4,7 @@ $remote = @'
 set -e
 compose_file='/volume1/docker/delay audio/docker-compose.yaml'
 sudo docker compose -f "$compose_file" --project-name delay-audio config -q
-sudo env BUILDX_GIT_INFO=false docker compose -f "$compose_file" --project-name delay-audio up -d --build delay-audio
+sudo env BUILDX_GIT_INFO=false docker compose -f "$compose_file" --project-name delay-audio up -d --build --force-recreate delay-audio
 echo "--- docker ps ---"
 sudo docker ps --filter 'name=^/delay-audio$' --format '{{.Names}} {{.Status}} {{.Ports}}'
 echo "--- compose ---"

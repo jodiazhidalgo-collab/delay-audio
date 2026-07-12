@@ -354,15 +354,33 @@ class VisualVerifier:
         vfr = ref_meta.variable_frame_rate or esp_meta.variable_frame_rate
         tempo = ref_meta.avg_fps / esp_meta.avg_fps if rates_differ and not vfr else 1.0
         delay_hint = max(-120000, min(120000, int(round(_finite_float(delay_hint_ms)))))
-        esp_source_duration = preview_duration * tempo
-        mapped_esp_start = map_ref_to_esp_time(ref_start, delay_hint / 1000.0, tempo)
-        esp_start = min(
-            esp_core["end_sec"] - esp_source_duration,
-            max(esp_core["start_sec"], mapped_esp_start),
-        )
-        clamped = abs(esp_start - mapped_esp_start) > 0.05
         window_sec = min(6.0, max(2.0, preview_duration / 3.0))
-        relative_max_ms = max(0, int(round((preview_duration - window_sec) * 1000.0)))
+        window_sec = min(window_sec, esp_core["span_sec"] / tempo)
+        if window_sec < 2.0:
+            raise RuntimeError("No hay core español suficiente para reproducir el preview")
+
+        relative_span_sec = max(0.0, preview_duration - window_sec)
+        esp_window_source_duration = window_sec * tempo
+        mapped_esp_base = map_ref_to_esp_time(ref_start, delay_hint / 1000.0, tempo)
+        esp_base = min(
+            esp_core["end_sec"] - esp_window_source_duration,
+            max(esp_core["start_sec"], mapped_esp_base),
+        )
+        available_before_sec = max(0.0, (esp_base - esp_core["start_sec"]) / tempo)
+        available_after_sec = max(
+            0.0,
+            (esp_core["end_sec"] - (esp_base + esp_window_source_duration)) / tempo,
+        )
+        spanish_before_sec = min(relative_span_sec, available_before_sec)
+        spanish_after_sec = min(relative_span_sec, available_after_sec)
+        spanish_preview_duration = spanish_before_sec + window_sec + spanish_after_sec
+        esp_start = esp_base - spanish_before_sec * tempo
+        esp_source_duration = spanish_preview_duration * tempo
+        clamped = (
+            abs(esp_base - mapped_esp_base) > 0.05
+            or spanish_before_sec < relative_span_sec - 0.05
+            or spanish_after_sec < relative_span_sec - 0.05
+        )
         return {
             "ok": True,
             "profile": "trailer" if str(profile).lower() == "trailer" else "pelicula",
@@ -372,9 +390,12 @@ class VisualVerifier:
             "reference_clip_start_sec": round(ref_start, 6),
             "spanish_clip_start_sec": round(esp_start, 6),
             "spanish_source_duration_sec": round(esp_source_duration, 6),
+            "spanish_preview_duration_sec": round(spanish_preview_duration, 6),
+            "spanish_neutral_offset_sec": round(spanish_before_sec, 6),
             "preview_duration_sec": round(preview_duration, 6),
             "window_sec": round(window_sec, 6),
-            "relative_max_offset_ms": relative_max_ms,
+            "relative_min_offset_ms": -max(0, int(round(spanish_before_sec * 1000.0))),
+            "relative_max_offset_ms": max(0, int(round(spanish_after_sec * 1000.0))),
             "delay_hint_ms": delay_hint,
             "tempo": round(tempo, 12),
             "fps_correction_planned": bool(rates_differ and not vfr),

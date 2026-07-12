@@ -387,8 +387,13 @@ class PreviewPlanTests(unittest.TestCase):
         self.assertGreater(plan["reference_clip_start_sec"], 3000.0)
         self.assertNotEqual(plan["reference_clip_start_sec"], 0.0)
         self.assertAlmostEqual(plan["tempo"], 0.96, places=9)
-        expected = (plan["reference_clip_start_sec"] - 2.0) * 0.96
-        self.assertAlmostEqual(plan["spanish_clip_start_sec"], expected, places=6)
+        mapped_base = (plan["reference_clip_start_sec"] - 2.0) * 0.96
+        expected_start = mapped_base - 24.0 * 0.96
+        self.assertAlmostEqual(plan["spanish_clip_start_sec"], expected_start, places=6)
+        self.assertEqual(plan["spanish_preview_duration_sec"], 54.0)
+        self.assertEqual(plan["spanish_neutral_offset_sec"], 24.0)
+        self.assertEqual(plan["relative_min_offset_ms"], -24000)
+        self.assertEqual(plan["relative_max_offset_ms"], 24000)
         self.assertEqual(plan["delay_hint_ms"], 2000)
 
     def test_trailer_preview_uses_short_profile_and_core(self):
@@ -402,6 +407,10 @@ class PreviewPlanTests(unittest.TestCase):
         self.assertEqual(plan["core_end_sec"], 86.0)
         self.assertGreater(plan["reference_clip_start_sec"], 0.0)
         self.assertLess(plan["window_sec"], plan["preview_duration_sec"])
+        self.assertEqual(plan["spanish_preview_duration_sec"], 20.0)
+        self.assertEqual(plan["spanish_neutral_offset_sec"], 8.0)
+        self.assertEqual(plan["relative_min_offset_ms"], -8000)
+        self.assertEqual(plan["relative_max_offset_ms"], 8000)
 
 
 class ReplacementVisualVerifier(VisualVerifier):
