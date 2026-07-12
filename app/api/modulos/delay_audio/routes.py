@@ -1896,7 +1896,11 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
             "--no-buttons",
             "--no-attachments",
         ]
-        cmd.extend(mkvmerge_metadata_subtitulos(job["ref"], cfg.get("sub_video_bueno", DEFAULT_CONFIG["sub_video_bueno"])))
+        ref_subtitle_plan = mkvmerge_subtitle_plan(
+            job["ref"],
+            cfg.get("sub_video_bueno", DEFAULT_CONFIG["sub_video_bueno"]),
+        )
+        cmd.extend(ref_subtitle_plan["metadata_args"])
         cmd.extend([
             job["ref"],
             "--no-video",
@@ -1912,10 +1916,14 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
             "--no-chapters",
             audio_input["path"],
         ])
-        esp_subtitle_track_ids = mkvmerge_track_ids(job["esp"], "subtitles")
+        esp_subtitle_plan = mkvmerge_subtitle_plan(
+            job["esp"],
+            cfg.get("sub_fuente_espanol", DEFAULT_CONFIG["sub_fuente_espanol"]),
+        )
+        esp_subtitle_track_ids = esp_subtitle_plan["track_ids"]
         if esp_subtitle_track_ids:
             cmd.extend(mkvmerge_sync_tracks(esp_subtitle_track_ids, delay_ms))
-            cmd.extend(mkvmerge_metadata_subtitulos(job["esp"], cfg.get("sub_fuente_espanol", DEFAULT_CONFIG["sub_fuente_espanol"])))
+            cmd.extend(esp_subtitle_plan["metadata_args"])
             cmd.extend([
                 "--no-video",
                 "--no-audio",
@@ -1946,7 +1954,8 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
             log_job(job, "EXPORTACION: mkvmerge termino con avisos; valido el temporal antes de publicarlo.")
 
         diagnostico_event(job, "verify_temp", "started", "Validando temporal", {"temp_output_path": temp_output_path})
-        validar_mkv_exportado(temp_output_path, video_duration)
+        expected_subtitle_titles = ref_subtitle_plan["titles"] + esp_subtitle_plan["titles"]
+        validar_mkv_exportado(temp_output_path, video_duration, expected_subtitle_titles)
         diagnostico_event(job, "verify_temp", "finished", "Temporal validado", {"temp_output_path": temp_output_path})
         prepublish_failures = limpiar_temporales_diagnosticados(job, temp_cleanup_paths, "export_audio")
         if final_cleanup_paths is not None:
@@ -1963,7 +1972,7 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
         published_output = True
         diagnostico_event(job, "publish_output", "finished", "Salida final publicada", {"output_path": output_path})
         diagnostico_event(job, "verify_final", "started", "Validando salida final", {"output_path": output_path})
-        validar_mkv_exportado(output_path, video_duration)
+        validar_mkv_exportado(output_path, video_duration, expected_subtitle_titles)
         diagnostico_event(job, "verify_final", "finished", "Salida final validada", {"output_path": output_path})
     except Exception as exc:
         error_phase = fase_error_exportacion(str(exc))
@@ -3152,8 +3161,10 @@ def mkvmerge_track_id_for_ffprobe_index(path, ffprobe_index, codec_type):
     raise RuntimeError("No he podido relacionar la pista elegida con mkvmerge.")
 
 
-def mkvmerge_metadata_subtitulos(path, origen):
-    out = []
+def mkvmerge_subtitle_plan(path, origen):
+    metadata_args = []
+    track_ids = []
+    titles = []
     data = mkvmerge_identify(path)
     origen = limpiar_texto_mkv(origen)
     for track in data.get("tracks") or []:
@@ -3164,9 +3175,19 @@ def mkvmerge_metadata_subtitulos(path, origen):
             continue
         properties = track.get("properties") or {}
         original = limpiar_texto_mkv(properties.get("track_name") or "")
-        title = f"{original} ? {origen}" if original else origen
-        out.extend(["--track-name", f"{track_id}:{title}"])
-    return out
+        title = f"{original} - {origen}" if original else origen
+        track_ids.append(int(track_id))
+        titles.append(title)
+        metadata_args.extend(["--track-name", f"{track_id}:{title}"])
+    return {
+        "track_ids": track_ids,
+        "titles": titles,
+        "metadata_args": metadata_args,
+    }
+
+
+def mkvmerge_metadata_subtitulos(path, origen):
+    return mkvmerge_subtitle_plan(path, origen)["metadata_args"]
 
 
 def mkvmerge_track_ids(path, track_type):
@@ -3194,7 +3215,7 @@ def limpiar_texto_mkv(value):
     return re.sub(r"[\r\n\t]+", " ", text)[:120]
 
 
-def validar_mkv_exportado(path, video_duration):
+def validar_mkv_exportado(path, video_duration, expected_subtitle_titles=None):
     if not os.path.isfile(path):
         raise RuntimeError("No se genero el MKV final.")
     if os.path.getsize(path) <= 4096:
@@ -3206,6 +3227,31 @@ def validar_mkv_exportado(path, video_duration):
         raise RuntimeError("El MKV final no tiene pista de video.")
     if not any(track.get("type") == "audio" for track in tracks):
         raise RuntimeError("El MKV final no tiene pista de audio.")
+
+    if expected_subtitle_titles is not None:
+        subtitle_tracks = [track for track in tracks if track.get("type") == "subtitles"]
+        expected_titles = [str(title or "").strip() for title in expected_subtitle_titles]
+        if len(subtitle_tracks) != len(expected_titles):
+            raise RuntimeError(
+                "El MKV final no conserva todos los subtitulos: "
+                f"esperados {len(expected_titles)}, encontrados {len(subtitle_tracks)}."
+            )
+        actual_titles = [
+            str((track.get("properties") or {}).get("track_name") or "").strip()
+            for track in subtitle_tracks
+        ]
+        unmatched_titles = list(actual_titles)
+        missing_titles = []
+        for title in expected_titles:
+            if title in unmatched_titles:
+                unmatched_titles.remove(title)
+            else:
+                missing_titles.append(title)
+        if missing_titles:
+            raise RuntimeError(
+                "El MKV final no conserva los nombres de subtitulos esperados: "
+                + ", ".join(missing_titles[:3])
+            )
 
     final_duration = duracion_formato(path)
     if not final_duration or final_duration <= 0:
@@ -3464,7 +3510,7 @@ def metadata_subtitulos(path, offset, origen):
     for idx, stream in enumerate(ffprobe_streams(path, "s")):
         tags = stream.get("tags") or {}
         original = str(tags.get("title") or "").strip()
-        title = f"{original} ? {origen}" if original else origen
+        title = f"{original} - {origen}" if original else origen
         out.extend([f"-metadata:s:s:{offset + idx}", f"title={title}"])
     return out
 
