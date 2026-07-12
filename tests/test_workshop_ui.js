@@ -285,7 +285,7 @@ async function main() {
       state: "OK_VERIFICADO",
       delay_ms: 800,
       export_allowed: true,
-      visual: { verified: true, zones_valid: 3 },
+      visual: { verified: true, verification_mode: "absolute", strong_winner: true, zones_valid: 3 },
       audio: { supporting_zones: 3 },
       fps_correction: { planned: true, confirmed: true, applied: true },
       measurement_core: { start_sec: 120, end_sec: 5280, span_sec: 5160 },
@@ -296,6 +296,63 @@ async function main() {
   )`);
   assert.match(hybridEvidenceHtml, /Zona útil/);
   assert.match(hybridEvidenceHtml, /Aceleró fast path/);
+  assert.match(hybridEvidenceHtml, /Verificación absoluta/);
+  assert.match(hybridEvidenceHtml, /3 zonas válidas/);
+
+  const relativeEvidenceHtml = harness.evaluate(`renderWorkshopHybridEvidence(
+    { requested_mode: "medir" },
+    {
+      state: "OK_VERIFICADO",
+      delay_ms: -1000,
+      export_allowed: true,
+      visual: {
+        verified: true,
+        verification_mode: "relative",
+        strong_winner: false,
+        zones_valid: 1,
+        relative_wins: 6,
+        relative_ties: 1,
+        relative_losses: 0,
+        relative_mean_delta: 0.19543
+      },
+      audio: { supporting_zones: 4 },
+      fps_correction: { planned: false, confirmed: false, applied: false, reason: "fps_iguales" },
+      measurement_core: { start_sec: 120, end_sec: 10451, span_sec: 10331 },
+      edit_hint: { hint_used: true, hint_helped_fast_path: false },
+      decision: { reason: "descubrimiento_audio_timeline_y_visual_relativo_coinciden", contradictions: [] }
+    },
+    hybridWorkshopResultInfo({ state: "OK_VERIFICADO" })
+  )`);
+  assert.match(relativeEvidenceHtml, /Verificación relativa/);
+  assert.match(relativeEvidenceHtml, /6 victorias · 1 empates · 0 pérdidas · Δ media \+0\.195/);
+  assert.doesNotMatch(relativeEvidenceHtml, />1 zona válida</);
+  assert.match(relativeEvidenceHtml, /Audio, línea temporal e imagen relativa confirman el mismo delay/);
+
+  const fpsEvidenceHtml = harness.evaluate(`renderWorkshopHybridEvidence(
+    { requested_mode: "medir" },
+    {
+      state: "OK_VERIFICADO",
+      delay_ms: 2620,
+      export_allowed: true,
+      visual: {
+        verified: true,
+        stage: "fps_visual_confirmation",
+        absolute_match: false,
+        relative_match: true,
+        relative_wins: 3,
+        zones_valid: 3
+      },
+      audio: { supporting_zones: 3 },
+      fps_correction: { planned: true, confirmed: true, applied: true, ref_fps: 24, esp_fps: 25 },
+      measurement_core: { start_sec: 120, end_sec: 5280, span_sec: 5160 },
+      edit_hint: { hint_used: false },
+      decision: { reason: "interior_timeline_audio_and_visual_match", contradictions: [] }
+    },
+    hybridWorkshopResultInfo({ state: "OK_VERIFICADO" })
+  )`);
+  assert.match(fpsEvidenceHtml, /Verificación FPS/);
+  assert.doesNotMatch(fpsEvidenceHtml, /No verificada/);
+  assert.match(fpsEvidenceHtml, /Línea temporal, audio e imagen confirman la corrección FPS/);
 
   let previewRequest = "";
   harness.setState({

@@ -160,6 +160,7 @@ class FakeFpsVisualVerifier:
                 "relative_match": confirmed,
                 "relative_wins": 3 if confirmed else 0,
                 "mean_delta": 0.15 if confirmed else 0.0,
+                "contradictory_zones": 0,
                 "comparisons": [],
             },
         }

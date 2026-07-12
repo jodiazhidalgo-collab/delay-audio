@@ -130,6 +130,78 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(ranked[0]["wins"], 2)
         self.assertEqual(ranked[1]["wins"], 0)
 
+    def test_relative_evidence_uses_comparable_low_ssim_zones(self):
+        zones = []
+        deltas = [0.258832, -0.012151, 0.327195, 0.273071, 0.145336, 0.292567, 0.083159]
+        for index, delta in enumerate(deltas):
+            zones.append({
+                "pct": index,
+                "state": "INUTIL",
+                "candidates": [
+                    {"delay_ms": -1000, "mean_ssim": 0.50 + delta},
+                    {"delay_ms": 0, "mean_ssim": 0.50},
+                ],
+            })
+        evidence = VisualVerifier._relative_evidence([-1000, 0], zones, self.movie_cfg)
+        self.assertTrue(evidence["relative_match"])
+        self.assertEqual(evidence["relative_wins"], 6)
+        self.assertEqual(evidence["relative_ties"], 1)
+        self.assertEqual(evidence["relative_losses"], 0)
+        self.assertAlmostEqual(evidence["relative_mean_delta"], 0.19543, places=6)
+
+    def test_one_clear_relative_loss_blocks_verification(self):
+        zones = [
+            {
+                "pct": index,
+                "candidates": [
+                    {"delay_ms": 1000, "mean_ssim": target},
+                    {"delay_ms": 0, "mean_ssim": 0.50},
+                ],
+            }
+            for index, target in enumerate((0.70, 0.68, 0.40))
+        ]
+        evidence = VisualVerifier._relative_evidence([1000, 0], zones, self.movie_cfg)
+        self.assertFalse(evidence["relative_match"])
+        self.assertEqual(evidence["relative_losses"], 1)
+
+
+class RelativeVisualVerifier(VisualVerifier):
+    def probe_video(self, path):
+        return fake_meta(path, 100.0, 24.0)
+
+    def score_candidate(self, ref_video, esp_video_original, ref_time, delay_ms, *args, **kwargs):
+        score = 0.65 if int(delay_ms) == -1000 else 0.45 if int(delay_ms) == 0 else 0.40
+        return {"ok": True, "mean_ssim": score, "frames": 4}
+
+
+class RelativeVisualIntegrationTests(unittest.TestCase):
+    def test_visual_final_can_verify_relative_with_zero_absolute_valid_zones(self):
+        result = RelativeVisualVerifier().score_candidates(
+            "ref",
+            "esp",
+            [-1000, 0],
+            "pelicula",
+            stage="visual_final",
+        )
+        self.assertEqual(result["zones_valid"], 0)
+        self.assertEqual(result["winner_delay_ms"], -1000)
+        self.assertTrue(result["relative_match"])
+        self.assertEqual(result["relative_target_delay_ms"], -1000)
+        self.assertEqual(result["verification_mode"], "relative")
+        self.assertTrue(result["verified"])
+
+    def test_fast_path_remains_absolute_only(self):
+        result = RelativeVisualVerifier().score_candidates(
+            "ref",
+            "esp",
+            [-1000, 0],
+            "pelicula",
+            stage="visual_fast_path",
+        )
+        self.assertTrue(result["relative_match"] is False)
+        self.assertEqual(result["verification_mode"], "none")
+        self.assertFalse(result["verified"])
+
 
 class FailingVisualVerifier(VisualVerifier):
     def _run_ssim(self, *args, **kwargs):

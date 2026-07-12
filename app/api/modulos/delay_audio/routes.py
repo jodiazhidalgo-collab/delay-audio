@@ -527,6 +527,75 @@ def fingerprint_config_hibrida(profile, enabled, visual_method, profile_config):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
+def _hybrid_visual_evidence(visual, audio):
+    if not isinstance(visual, dict) or visual.get("verified") is not True:
+        return False
+    if visual.get("stage") == "fps_visual_confirmation":
+        if visual.get("absolute_match") is True:
+            return True
+        relative_wins = visual.get("relative_wins")
+        contradictory_zones = visual.get("contradictory_zones")
+        mean_delta = visual.get("mean_delta")
+        return bool(
+            visual.get("relative_match") is True
+            and isinstance(relative_wins, int)
+            and not isinstance(relative_wins, bool)
+            and relative_wins >= 2
+            and isinstance(contradictory_zones, int)
+            and not isinstance(contradictory_zones, bool)
+            and contradictory_zones == 0
+            and _finite_number(mean_delta)
+            and float(mean_delta) >= 0.08
+        )
+    mode = str(visual.get("verification_mode") or "").strip().lower()
+    if mode not in {"absolute", "relative", "none"}:
+        mode = "absolute" if visual.get("strong_winner") is True else "none"
+    if mode == "absolute":
+        return visual.get("strong_winner") is True
+    if mode != "relative" or visual.get("relative_match") is not True:
+        return False
+
+    integer_fields = (
+        "relative_comparable_zones",
+        "relative_required_zones",
+        "relative_required_wins",
+        "relative_wins",
+        "relative_ties",
+        "relative_losses",
+    )
+    if not all(
+        isinstance(visual.get(key), int) and not isinstance(visual.get(key), bool)
+        for key in integer_fields
+    ):
+        return False
+    comparable = visual["relative_comparable_zones"]
+    required_zones = visual["relative_required_zones"]
+    required_wins = visual["relative_required_wins"]
+    wins = visual["relative_wins"]
+    ties = visual["relative_ties"]
+    losses = visual["relative_losses"]
+    mean_delta = visual.get("relative_mean_delta")
+    target_delay = visual.get("relative_target_delay_ms")
+    audio_delay = audio.get("delay_ms") if isinstance(audio, dict) else None
+    tolerance_ms = audio.get("tolerance_ms") if isinstance(audio, dict) else None
+    return bool(
+        visual.get("relative_supported") is True
+        and required_zones >= 2
+        and required_wins >= 2
+        and comparable >= required_zones
+        and wins >= required_wins
+        and ties >= 0
+        and losses == 0
+        and _finite_number(mean_delta)
+        and float(mean_delta) >= 0.08
+        and _finite_number(target_delay)
+        and _finite_number(audio_delay)
+        and _finite_number(tolerance_ms)
+        and float(tolerance_ms) >= 0
+        and abs(float(audio_delay) - float(target_delay)) <= float(tolerance_ms)
+    )
+
+
 def _hybrid_ok_evidence(
     confidence,
     fps_correction,
@@ -580,8 +649,7 @@ def _hybrid_ok_evidence(
         )
     return bool(
         confidence == "ALTA"
-        and isinstance(visual, dict)
-        and visual.get("verified") is True
+        and _hybrid_visual_evidence(visual, audio)
         and isinstance(supporting_zones, int)
         and not isinstance(supporting_zones, bool)
         and supporting_zones >= 3

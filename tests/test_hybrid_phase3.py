@@ -37,8 +37,12 @@ def verified_result(**overrides):
             "anchors_rejected": 0,
         },
         "edit_hint": {"hint_used": False, "hint_is_measurement": False},
-        "visual": {"verified": True},
-        "audio": {"supporting_zones": 3},
+        "visual": {
+            "verified": True,
+            "verification_mode": "absolute",
+            "strong_winner": True,
+        },
+        "audio": {"supporting_zones": 3, "delay_ms": 120, "tolerance_ms": 160},
         "reason": "audio_and_visual_agree",
         "contradictions": [],
     }
@@ -84,6 +88,68 @@ class HybridResultContractTests(unittest.TestCase):
         self.assertTrue(routes.contrato_resultado_hibrido_valido(result))
         self.assertTrue(routes.exportacion_hibrida_autorizada(result))
         self.assertIs(result["export_allowed"], True)
+
+    def test_historical_absolute_result_without_mode_remains_authorized(self):
+        result = verified_result(visual={"verified": True, "strong_winner": True})
+        self.assertEqual(result["state"], "OK_VERIFICADO")
+        self.assertTrue(routes.exportacion_hibrida_autorizada(result))
+
+    def test_verified_boolean_without_absolute_or_relative_evidence_is_blocked(self):
+        result = verified_result(visual={"verified": True})
+        self.assertEqual(result["state"], "NO_FIABLE")
+        self.assertFalse(routes.exportacion_hibrida_autorizada(result))
+
+    def test_complete_relative_result_is_authorized(self):
+        visual = {
+            "verified": True,
+            "verification_mode": "relative",
+            "strong_winner": False,
+            "relative_supported": True,
+            "relative_match": True,
+            "relative_target_delay_ms": -1000,
+            "relative_comparable_zones": 7,
+            "relative_required_zones": 3,
+            "relative_required_wins": 2,
+            "relative_wins": 6,
+            "relative_ties": 1,
+            "relative_losses": 0,
+            "relative_mean_delta": 0.19543,
+        }
+        audio = {
+            "supporting_zones": 4,
+            "delay_ms": -1000,
+            "tolerance_ms": 160,
+        }
+        result = verified_result(delay_ms=-1000, visual=visual, audio=audio)
+        self.assertEqual(result["state"], "OK_VERIFICADO")
+        self.assertTrue(routes.exportacion_hibrida_autorizada(result))
+
+    def test_relative_result_with_loss_or_audio_mismatch_is_blocked(self):
+        base_visual = {
+            "verified": True,
+            "verification_mode": "relative",
+            "strong_winner": False,
+            "relative_supported": True,
+            "relative_match": True,
+            "relative_target_delay_ms": -1000,
+            "relative_comparable_zones": 7,
+            "relative_required_zones": 3,
+            "relative_required_wins": 2,
+            "relative_wins": 6,
+            "relative_ties": 1,
+            "relative_losses": 0,
+            "relative_mean_delta": 0.19543,
+        }
+        with_loss = dict(base_visual, relative_losses=1)
+        mismatched_audio = {"supporting_zones": 4, "delay_ms": 5000, "tolerance_ms": 160}
+        for visual, audio in (
+            (with_loss, {"supporting_zones": 4, "delay_ms": -1000, "tolerance_ms": 160}),
+            (base_visual, mismatched_audio),
+        ):
+            with self.subTest(visual=visual, audio=audio):
+                result = verified_result(delay_ms=-1000, visual=visual, audio=audio)
+                self.assertEqual(result["state"], "NO_FIABLE")
+                self.assertFalse(routes.exportacion_hibrida_autorizada(result))
 
     def test_media_cannot_become_verified(self):
         result = verified_result(confidence="MEDIA")

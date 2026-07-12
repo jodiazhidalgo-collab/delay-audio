@@ -32,9 +32,17 @@ class StagedVisualVerifier:
         if stage == "visual_fast_path":
             winner = self.motor.fast_visual_winner
             strong = self.motor.fast_visual_strong
+            relative = False
+            relative_target = None
         else:
             winner = self.motor.final_visual_winner
             strong = self.motor.final_visual_strong
+            relative = self.motor.final_visual_relative
+            relative_target = (
+                self.motor.final_relative_target
+                if self.motor.final_relative_target is not None
+                else winner
+            )
         required = 2 if profile == "trailer" else 3
         zones = []
         if stage == "visual_final" and self.motor.mixed_visual_winners and len(candidates) >= 2:
@@ -44,7 +52,14 @@ class StagedVisualVerifier:
                     "winner_delay_ms": int(candidates[index % 2]),
                 })
         else:
-            zones = [{"state": "FUERTE", "winner_delay_ms": winner} for _ in range(required)]
+            zones = [
+                {
+                    "state": "INUTIL" if relative else "FUERTE",
+                    "winner_delay_ms": winner,
+                }
+                for _ in range(required)
+            ]
+        verification_mode = "absolute" if strong else "relative" if relative else "none"
         return {
             "ok": True,
             "stage": stage,
@@ -52,11 +67,23 @@ class StagedVisualVerifier:
             "tempo": tempo,
             "candidate_delays_ms": list(candidates),
             "zones_attempted": required,
-            "zones_valid": required,
+            "zones_valid": 0 if relative else required,
             "zones_strong": required if strong else 0,
             "winner_delay_ms": winner,
             "unique_winner": strong,
             "strong_winner": strong,
+            "absolute_supported": strong,
+            "relative_supported": relative,
+            "verification_mode": verification_mode,
+            "verified": verification_mode != "none",
+            "relative_target_delay_ms": relative_target,
+            "relative_reference_delay_ms": 0 if relative else None,
+            "relative_comparable_zones": required if relative else 0,
+            "relative_wins": required if relative else 0,
+            "relative_ties": 0,
+            "relative_losses": 0,
+            "relative_mean_delta": 0.20 if relative else 0.0,
+            "relative_match": relative,
             "candidates": [
                 {"delay_ms": int(candidate), "wins": required if int(candidate) == int(winner or 0) else 0, "mean_ssim": 0.95}
                 for candidate in candidates
@@ -76,6 +103,8 @@ class DeterministicDiscoveryMotor(DelayAudio):
         fast_visual_strong=False,
         final_visual_winner=3000,
         final_visual_strong=True,
+        final_visual_relative=False,
+        final_relative_target=None,
         fast_audio_delays=(),
         discovery_delays=(3000, 3000, 3000, 3000),
         discovery_scores=None,
@@ -99,6 +128,8 @@ class DeterministicDiscoveryMotor(DelayAudio):
         self.fast_visual_strong = fast_visual_strong
         self.final_visual_winner = final_visual_winner
         self.final_visual_strong = final_visual_strong
+        self.final_visual_relative = final_visual_relative
+        self.final_relative_target = final_relative_target
         self.fast_audio_delays = list(fast_audio_delays)
         self.discovery_delays = list(discovery_delays)
         self.discovery_scores = list(discovery_scores or [0.72] * len(self.discovery_delays))
@@ -236,6 +267,38 @@ class HybridDiscoveryTests(unittest.TestCase):
         self.assertIn(0, result["audio"]["candidate_delays_ms"])
         self.assertTrue(contrato_resultado_hibrido_valido(result))
         self.assertEqual(motor.discovery_audio_calls, 4)
+
+    def test_relative_visual_and_stable_audio_verify_without_absolute_zones(self):
+        _, returncode, result = self.run_case(
+            final_visual_winner=0,
+            final_visual_strong=False,
+            final_visual_relative=True,
+            final_relative_target=-1000,
+            discovery_delays=(-1000, -1000, -1000, -1000),
+            discovery_scores=(0.75, 0.44, 0.42, 0.94),
+        )
+        self.assertEqual(returncode, 0)
+        self.assertEqual(result["state"], "OK_VERIFICADO")
+        self.assertEqual(result["delay_ms"], -1000)
+        self.assertTrue(result["export_allowed"])
+        self.assertEqual(result["visual"]["verification_mode"], "relative")
+        self.assertEqual(result["visual"]["relative_target_delay_ms"], -1000)
+        self.assertEqual(result["visual"]["zones_valid"], 0)
+        self.assertEqual(
+            result["decision"]["reason"],
+            "descubrimiento_audio_timeline_y_visual_relativo_coinciden",
+        )
+
+    def test_relative_visual_without_stable_audio_remains_blocked(self):
+        _, _, result = self.run_case(
+            final_visual_winner=0,
+            final_visual_strong=False,
+            final_visual_relative=True,
+            final_relative_target=-1000,
+            discovery_delays=(-1000, 5000, -8000, 12000, -1000, 5000),
+        )
+        self.assertNotEqual(result["state"], "OK_VERIFICADO")
+        self.assertFalse(result["export_allowed"])
 
     def test_audio_and_image_with_different_delays_are_origin_doubtful(self):
         _, _, result = self.run_case(

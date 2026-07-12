@@ -35,11 +35,12 @@ El motor separa siempre la evidencia visual de la evidencia de audio:
 1. La imagen compara `Video Bueno` con el vídeo español original.
 2. Todas las posiciones visuales, estrechas, de descubrimiento, expansión, FPS y preview se eligen sobre un `measurement_core` común que excluye introducciones, logos, títulos y colas finales. Los porcentajes son siempre del core del vídeo de referencia.
 3. El audio compara las pistas seleccionadas. Con FPS distintos usa un `.mka` provisional después de descartar VFR no resuelto, pero crear ese temporal no confirma ni aplica todavía la corrección.
-4. El camino rápido necesita coincidencia visual fuerte y tres anclas interiores de audio coherentes y distribuidas.
-5. Si falta corroboración, el descubrimiento amplía zonas solo por una duda concreta registrada.
-6. Ningún score aislado, una sola zona o una confianza heredada autorizan exportación.
+4. El camino rápido necesita coincidencia visual absoluta fuerte y tres anclas interiores de audio coherentes y distribuidas.
+5. Si el camino rápido no cierra, el descubrimiento puede verificar la imagen por vía absoluta o relativa usando los SSIM que ya ha calculado. La vía relativa compara el primer candidato del clúster de audio con el mejor competidor, exige las zonas requeridas del perfil, al menos `max(2, required_strong)` victorias con mejora `>= 0.05`, media `>= 0.08` y cero pérdidas claras. Nunca autoriza sin clúster de audio único, puntuación y dispersión válidas y `timeline_model.compatible == true`.
+6. Si falta corroboración, el descubrimiento amplía zonas solo por una duda concreta registrada.
+7. Ningún score aislado, una sola zona o una confianza heredada autorizan exportación.
 
-El resultado híbrido contiene `state`, `delay_ms`, `measurement_core`, `timeline_model`, `edit_hint`, `visual`, `audio`, `fps_correction`, `decision`, `export_allowed` y, si se intentó exportar, `export`.
+El resultado híbrido contiene `state`, `delay_ms`, `measurement_core`, `timeline_model`, `edit_hint`, `visual`, `audio`, `fps_correction`, `decision`, `export_allowed` y, si se intentó exportar, `export`. La evidencia visual declara `verification_mode: absolute | relative | none`; el modo relativo conserva objetivo, competidor, zonas comparables, victorias, empates, pérdidas y mejora media.
 
 ## Perfiles
 
@@ -77,7 +78,7 @@ Cada coincidencia de audio produce una pareja interior `(ref_time, esp_time)`. S
 
 ## Estados finales
 
-- `OK_VERIFICADO`: imagen y audio sostienen el mismo delay con evidencia suficiente.
+- `OK_VERIFICADO`: imagen y audio sostienen el mismo delay con evidencia suficiente, mediante verificación visual absoluta o relativa respaldada por el modelo temporal.
 - `NO_FIABLE`: el análisis terminó, pero no reúne evidencia suficiente.
 - `MONTAJE_DISTINTO`: ningún delay fijo explica las distintas zonas.
 - `FPS_NO_CONFIRMADOS`: no se ha confirmado una corrección de velocidad segura.
@@ -85,7 +86,7 @@ Cada coincidencia de audio produce una pareja interior `(ref_time, esp_time)`. S
 - `AUDIO_VIDEO_ORIGEN_DUDOSO`: imagen y audio no confirman el mismo origen temporal.
 - `ERROR_TECNICO`: una dependencia o ejecución impidió completar el análisis.
 
-La web muestra de forma compacta delay final, estado, zona útil, verificación y zonas visuales válidas, anclas de audio coherentes, estado FPS, si Editar ayudó, motivo traducido y exportación realizada, en curso, no solicitada, bloqueada o fallida. Solo `OK_VERIFICADO` muestra un delay como final; los estados rechazados muestran `--`.
+La web muestra de forma compacta delay final, estado, zona útil, modo de verificación visual, anclas de audio coherentes, estado FPS, si Editar ayudó, motivo traducido y exportación realizada, en curso, no solicitada, bloqueada o fallida. La verificación absoluta enseña zonas válidas; la relativa enseña victorias, empates, pérdidas y mejora media para no confundir ambos criterios; una confirmación visual propia del plan de velocidad se identifica como `Verificación FPS`. Solo `OK_VERIFICADO` muestra un delay como final; los estados rechazados muestran `--`.
 
 ## Autorización de exportación
 
@@ -95,6 +96,7 @@ La única autorización válida es:
 - `state == "OK_VERIFICADO"`;
 - `export_allowed is True`;
 - contrato completo, sin contradicciones, con FPS seguro, core válido y `timeline_model.compatible == true` con tres inliers.
+- si la imagen se verificó por vía relativa, objetivo visual y clúster de audio coinciden dentro de la tolerancia y la evidencia relativa cumple íntegramente su contrato.
 
 `MEDIA`, `ALTA`, `result.ok` o un resultado legacy no sustituyen esta puerta. `Solo medir` se congela al crear el job y no puede convertirse después en exportación por cambiar los ajustes.
 
@@ -138,6 +140,7 @@ Cada evento guarda solo fase, duración, perfil, posición de zona, candidato, p
 
 - Unitarias de mapeo temporal, signos de delay, límites y planes FPS.
 - Decisiones con una zona, zonas contradictorias, coincidencia, contradicción visual, estados incompletos y errores técnicos.
+- Decisiones absolutas y relativas, incluido SSIM absoluto bajo, cero zonas absolutas válidas, pérdida relativa, audio inestable y objetivo visual distinto del clúster de audio.
 - Perfiles Película y Tráiler con sus límites propios.
 - `Solo medir` y `Medir y exportar`, incluida la puerta estricta.
 - Material real o controlado con delay positivo, negativo y cero; FPS iguales y conversión confirmada.

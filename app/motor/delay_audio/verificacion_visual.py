@@ -24,6 +24,8 @@ from measurement_core import build_measurement_core, core_zone_start, map_ref_to
 
 SSIM_RE = re.compile(r"\bAll:([-+]?[0-9]*\.?[0-9]+)")
 FINAL_STATES = {"FUERTE", "VALIDA", "SOSPECHOSA", "INUTIL"}
+RELATIVE_CLEAR_DELTA = 0.05
+RELATIVE_MEAN_DELTA = 0.08
 
 DEFAULT_VISUAL_CONFIG: dict[str, dict[str, Any]] = {
     "pelicula": {
@@ -696,6 +698,15 @@ class VisualVerifier:
             and winner_wins > runner_wins
         )
         strong_winner = bool(unique_winner and strong_count >= required_strong)
+        relative = self._relative_evidence(base_candidates, zone_results, cfg)
+        relative_match = bool(stage == "visual_final" and relative["relative_match"])
+        verification_mode = (
+            "absolute"
+            if strong_winner
+            else "relative"
+            if relative_match
+            else "none"
+        )
         result = {
             "ok": True,
             "method": "ffmpeg_ssim_burst_v1",
@@ -710,12 +721,18 @@ class VisualVerifier:
             "winner_delay_ms": winner_delay,
             "unique_winner": unique_winner,
             "strong_winner": strong_winner,
+            "absolute_supported": strong_winner,
+            "relative_supported": relative_match,
+            "verification_mode": verification_mode,
+            "verified": verification_mode != "none",
             "candidates": aggregate,
             "zones": zone_results,
             "ref": ref_meta.as_dict(),
             "esp_video_original": esp_meta.as_dict(),
             "duration_sec": round(time.monotonic() - started, 3),
         }
+        result.update(relative)
+        result["relative_match"] = relative_match
         if stage != "visual_final":
             self._event(stage, "finished", {
                 "profile": profile,
@@ -725,6 +742,7 @@ class VisualVerifier:
                 "winner_delay_ms": winner_delay,
                 "unique_winner": unique_winner,
                 "strong_winner": strong_winner,
+                "verification_mode": verification_mode,
                 "duration_sec": result["duration_sec"],
             })
         return result
@@ -742,6 +760,96 @@ class VisualVerifier:
         if score >= float(cfg["visual_valid_min"]):
             return "SOSPECHOSA"
         return "INUTIL"
+
+    @staticmethod
+    def _relative_evidence(
+        base_candidates: list[int],
+        zones: list[dict[str, Any]],
+        cfg: dict[str, Any],
+    ) -> dict[str, Any]:
+        target = int(base_candidates[0]) if len(base_candidates) >= 2 else None
+        required_zones = int(cfg.get("visual_required_zones") or 1)
+        required_wins = max(2, int(cfg.get("visual_required_strong") or 1))
+        comparisons = []
+        reference_counts: dict[int, int] = {}
+        deltas = []
+        wins = 0
+        ties = 0
+        losses = 0
+
+        if target is not None:
+            for zone in zones:
+                candidates = [
+                    item for item in zone.get("candidates") or []
+                    if item.get("mean_ssim") is not None
+                ]
+                own = next(
+                    (item for item in candidates if int(item.get("delay_ms") or 0) == target),
+                    None,
+                )
+                alternatives = [
+                    item for item in candidates
+                    if int(item.get("delay_ms") or 0) != target
+                ]
+                if own is None or not alternatives:
+                    continue
+                reference = max(alternatives, key=lambda item: float(item["mean_ssim"]))
+                reference_delay = int(reference.get("delay_ms") or 0)
+                delta = float(own["mean_ssim"]) - float(reference["mean_ssim"])
+                if not math.isfinite(delta):
+                    continue
+                deltas.append(delta)
+                reference_counts[reference_delay] = reference_counts.get(reference_delay, 0) + 1
+                if delta >= RELATIVE_CLEAR_DELTA:
+                    outcome = "win"
+                    wins += 1
+                elif delta < -RELATIVE_CLEAR_DELTA:
+                    outcome = "loss"
+                    losses += 1
+                else:
+                    outcome = "tie"
+                    ties += 1
+                comparisons.append({
+                    "pct": zone.get("pct"),
+                    "target_delay_ms": target,
+                    "reference_delay_ms": reference_delay,
+                    "target_ssim": round(float(own["mean_ssim"]), 6),
+                    "reference_ssim": round(float(reference["mean_ssim"]), 6),
+                    "delta": round(delta, 6),
+                    "outcome": outcome,
+                })
+
+        mean_delta = sum(deltas) / len(deltas) if deltas else 0.0
+        reference_delay = None
+        if reference_counts:
+            candidate_order = {int(value): index for index, value in enumerate(base_candidates)}
+            reference_delay = max(
+                reference_counts,
+                key=lambda value: (
+                    reference_counts[value],
+                    -candidate_order.get(value, len(candidate_order)),
+                ),
+            )
+        relative_match = bool(
+            target is not None
+            and len(deltas) >= required_zones
+            and wins >= required_wins
+            and losses == 0
+            and mean_delta >= RELATIVE_MEAN_DELTA
+        )
+        return {
+            "relative_target_delay_ms": target,
+            "relative_reference_delay_ms": reference_delay,
+            "relative_comparable_zones": len(deltas),
+            "relative_required_zones": required_zones,
+            "relative_required_wins": required_wins,
+            "relative_wins": wins,
+            "relative_ties": ties,
+            "relative_losses": losses,
+            "relative_mean_delta": round(mean_delta, 6),
+            "relative_match": relative_match,
+            "relative_comparisons": comparisons,
+        }
 
     @staticmethod
     def _aggregate_candidates(base_candidates: list[int], zones: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -743,6 +743,34 @@ class DelayAudio:
         return candidates[:max(1, int(limit))]
 
     @staticmethod
+    def visual_decision_evidence(visual):
+        visual = visual if isinstance(visual, dict) else {}
+        mode = str(visual.get("verification_mode") or "").strip().lower()
+        if mode not in {"absolute", "relative", "none"}:
+            mode = "absolute" if visual.get("strong_winner") is True else "none"
+
+        decision_delay = None
+        verified = False
+        if mode == "absolute":
+            candidate = visual.get("winner_delay_ms")
+            if visual.get("strong_winner") is True and isinstance(candidate, (int, float)):
+                if not isinstance(candidate, bool) and math.isfinite(float(candidate)):
+                    decision_delay = int(round(float(candidate)))
+                    verified = True
+        elif mode == "relative":
+            candidate = visual.get("relative_target_delay_ms")
+            if visual.get("relative_match") is True and isinstance(candidate, (int, float)):
+                if not isinstance(candidate, bool) and math.isfinite(float(candidate)):
+                    decision_delay = int(round(float(candidate)))
+                    verified = True
+
+        if not verified:
+            mode = "none"
+        visual["verification_mode"] = mode
+        visual["verified"] = verified
+        return mode, verified, decision_delay
+
+    @staticmethod
     def build_fast_audio_zones(
         duration_ref,
         duration_esp,
@@ -1609,11 +1637,12 @@ class DelayAudio:
             stage="visual_final",
         )
         visual = dict(visual)
-        visual["verified"] = bool(visual.get("strong_winner"))
+        visual_mode, visual_verified, visual_winner = self.visual_decision_evidence(visual)
         visual["fast_path"] = {
             "winner_delay_ms": (fast_visual or {}).get("winner_delay_ms"),
             "strong_winner": bool((fast_visual or {}).get("strong_winner")),
             "zones_valid": int((fast_visual or {}).get("zones_valid") or 0),
+            "verification_mode": str((fast_visual or {}).get("verification_mode") or "none"),
             "reason": initial_reason,
         }
         for candidate in visual.get("candidates") or []:
@@ -1627,11 +1656,13 @@ class DelayAudio:
             "winner_delay_ms": visual.get("winner_delay_ms"),
             "unique_winner": bool(visual.get("unique_winner")),
             "strong_winner": bool(visual.get("strong_winner")),
+            "verified": visual_verified,
+            "verification_mode": visual_mode,
+            "decision_delay_ms": visual_winner,
             "duration_sec": round(visual_final_sec, 3),
         })
 
         tolerance_ms = int(settings["tolerance_ms"])
-        visual_winner = visual.get("winner_delay_ms")
         matching_clusters = []
         if visual_winner is not None:
             matching_clusters = [
@@ -1666,8 +1697,8 @@ class DelayAudio:
             and timeline_model.get("compatible") is True
         )
         contradictions = []
-        if not visual.get("strong_winner"):
-            contradictions.append("visual_final_not_strong")
+        if not visual_verified:
+            contradictions.append("visual_final_not_verified")
         if not audio_support_ok:
             contradictions.append("audio_does_not_support_visual_winner")
         if timeline_model.get("compatible") is not True:
@@ -1725,16 +1756,20 @@ class DelayAudio:
             contradictions.append("multiple_repeated_audio_delays")
         if len(valid_visual_winners) >= 2:
             contradictions.append("multiple_visual_delays")
-        if visual.get("strong_winner") and audio_support_ok and not contradictions:
+        if visual_verified and audio_support_ok and not contradictions:
             state = "OK_VERIFICADO"
-            reason = "descubrimiento_audio_y_visual_coinciden"
+            reason = (
+                "descubrimiento_audio_timeline_y_visual_relativo_coinciden"
+                if visual_mode == "relative"
+                else "descubrimiento_audio_y_visual_coinciden"
+            )
             final_delay = int(support_cluster["delay_ms"])
             contradictions = []
         elif mounting_different:
             state = "MONTAJE_DISTINTO"
             reason = "ningun_delay_fijo_explica_las_zonas"
             final_delay = int((top_cluster or {}).get("delay_ms") or 0)
-        elif visual.get("strong_winner"):
+        elif visual_verified:
             state = "AUDIO_VIDEO_ORIGEN_DUDOSO"
             reason = "imagen_alinea_pero_audio_no_sostiene_el_mismo_origen"
             final_delay = int(visual_winner or 0)

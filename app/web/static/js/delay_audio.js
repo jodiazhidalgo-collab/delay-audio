@@ -1187,6 +1187,7 @@ function workshopHybridReason(result, fallback = "") {
   const labels = {
     fast_path_visual_y_audio_coinciden: "Imagen y audio confirman el mismo delay.",
     descubrimiento_audio_y_visual_coinciden: "El descubrimiento de audio y la imagen confirman el mismo delay.",
+    descubrimiento_audio_timeline_y_visual_relativo_coinciden: "Audio, línea temporal e imagen relativa confirman el mismo delay.",
     ningun_delay_fijo_explica_las_zonas: "Ningún delay fijo explica todas las zonas analizadas.",
     imagen_alinea_pero_audio_no_sostiene_el_mismo_origen: "La imagen alinea, pero el audio no confirma el mismo origen.",
     sin_zonas_utiles_en_audio_o_imagen: "No hay zonas útiles suficientes en audio o imagen.",
@@ -1196,6 +1197,8 @@ function workshopHybridReason(result, fallback = "") {
     duracion_no_confirma_tempo: "La duración no confirma el cambio de velocidad previsto.",
     imagen_no_confirma_tempo: "La imagen no confirma el cambio de velocidad previsto.",
     duration_ratio_and_visual_match: "Duración e imagen confirman la corrección FPS.",
+    duration_audio_drift_and_visual_match: "Duración, audio e imagen confirman la corrección FPS.",
+    interior_timeline_audio_and_visual_match: "Línea temporal, audio e imagen confirman la corrección FPS.",
     evidencia_insuficiente_para_autorizar: "La evidencia no permite autorizar el resultado.",
     resultado_legacy_sin_verificacion_hibrida: "El resultado anterior no tiene verificación híbrida.",
     estado_hibrido_desconocido: "El motor devolvió un estado no reconocido.",
@@ -1258,8 +1261,33 @@ function workshopHybridZoneText(value, singular, plural) {
 function renderWorkshopHybridEvidence(state, result, hybridInfo) {
   const visual = result?.visual || {};
   const audio = result?.audio || {};
-  const visualVerified = visual.verified === true;
+  const declaredVisualMode = String(visual.verification_mode || "").trim().toLowerCase();
+  const fpsVisualVerified = visual.stage === "fps_visual_confirmation"
+    && visual.verified === true
+    && (visual.absolute_match === true || visual.relative_match === true);
+  const visualMode = ["absolute", "relative", "none"].includes(declaredVisualMode)
+    ? declaredVisualMode
+    : fpsVisualVerified
+      ? "fps"
+    : visual.strong_winner === true
+      ? "absolute"
+      : "none";
+  const visualVerified = visual.verified === true && visualMode !== "none";
   const visualZones = visual.zones_valid ?? 0;
+  const visualTitle = visualVerified
+    ? visualMode === "relative"
+      ? "Verificación relativa"
+      : visualMode === "fps"
+        ? "Verificación FPS"
+        : "Verificación absoluta"
+    : "No verificada";
+  const relativeDelta = Number(visual.relative_mean_delta);
+  const relativeDeltaText = Number.isFinite(relativeDelta)
+    ? `${relativeDelta >= 0 ? "+" : ""}${relativeDelta.toFixed(3)}`
+    : "--";
+  const visualDetail = visualVerified && visualMode === "relative"
+    ? `${Math.max(0, Number(visual.relative_wins) || 0)} victorias · ${Math.max(0, Number(visual.relative_ties) || 0)} empates · ${Math.max(0, Number(visual.relative_losses) || 0)} pérdidas · Δ media ${relativeDeltaText}`
+    : workshopHybridZoneText(visualZones, "zona válida", "zonas válidas");
   const audioZones = audio.supporting_zones ?? result?.zones_count ?? 0;
   const fpsInfo = workshopHybridFpsInfo(result);
   const exportInfo = workshopHybridExportInfo(state, result);
@@ -1292,8 +1320,8 @@ function renderWorkshopHybridEvidence(state, result, hybridInfo) {
       </div>
       <div class="workshop-evidence-item ${visualVerified ? "is-ok" : "is-warn"}">
         <span>Imagen</span>
-        <strong>${escapeHtml(visualVerified ? "Verificada" : "No verificada")}</strong>
-        <small>${escapeHtml(workshopHybridZoneText(visualZones, "zona válida", "zonas válidas"))}</small>
+        <strong>${escapeHtml(visualTitle)}</strong>
+        <small>${escapeHtml(visualDetail)}</small>
       </div>
       <div class="workshop-evidence-item ${hybridInfo.verified ? "is-ok" : "is-warn"}">
         <span>Audio</span>
