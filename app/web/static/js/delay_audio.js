@@ -952,7 +952,7 @@ function renderWorkshopSlot(kind, slot, alerts = {}) {
           <div class="workshop-kicker">${escapeHtml(label)}</div>
           <h2>${selected ? escapeHtml(slot.name || "Video seleccionado") : "Sin seleccionar"}</h2>
         </div>
-        ${selected ? `<button class="workshop-mini workshop-edit${editWarningClass}" type="button" data-workshop-preview-open><span>Editar</span></button>` : ""}
+        ${selected && kind === "esp" ? `<button class="workshop-mini workshop-edit${editWarningClass}" type="button" data-workshop-preview-open><span>Editar</span></button>` : ""}
       </div>
       ${selected ? `
         <div class="workshop-meta">
@@ -1054,8 +1054,7 @@ function renderWorkshopPreviewModal(state) {
             </div>
           </div>
           <div class="workshop-preview-ruler" data-workshop-preview-ruler>
-            <div class="workshop-preview-lane is-ref"><span>Bueno</span><i></i></div>
-            <div class="workshop-preview-lane is-esp"><span>Español</span><i></i></div>
+            <div class="workshop-preview-lane is-esp" aria-label="Desplazamiento del vídeo español"><i></i></div>
           </div>
         ` : ""}
 

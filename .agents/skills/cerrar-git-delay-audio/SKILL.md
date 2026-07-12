@@ -33,6 +33,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .agents\skills\cerrar-git-de
 - Probar el bucle Git solo al modificar `close_git.ps1`, esta skill o `clean_residues.ps1`.
 - Crear la prueba exclusivamente en `_codex_runtime/test-data/` y eliminarla al terminar.
 - Si Git bloquea la prueba por `dubious ownership`, usar una configuracion temporal limitada al proceso o al repositorio sintetico.
+- El script de cierre resuelve la ruta UNC real y pasa una excepcion `safe.directory` exacta solo a cada comando Git del proceso.
 - No usar `safe.directory=*`, no cambiar la proteccion global y no eliminar las excepciones exactas necesarias para los repositorios reales del NAS.
 
 ## Reglas

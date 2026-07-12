@@ -220,10 +220,12 @@ async function main() {
     result: { state: "OK_VERIFICADO", export_allowed: true, delay_ms: 16000 }
   });
   const verifiedHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
+  const verifiedEspHtml = harness.evaluate("renderWorkshopSlot('esp', readWorkshopState().esp, workshopMetaAlerts(readWorkshopState()))");
   assert.match(verifiedHtml, /is-duration-warning/);
   assert.doesNotMatch(verifiedHtml, /is-duration-help-red|is-help-red/);
   assert.doesNotMatch(verifiedHtml, /Ayuda recomendada|Ayuda muy recomendable/);
-  assert.match(verifiedHtml, /<span>Editar<\/span><\/button>/);
+  assert.doesNotMatch(verifiedHtml, /<span>Editar<\/span><\/button>/);
+  assert.match(verifiedEspHtml, /<span>Editar<\/span><\/button>/);
 
   harness.setState({
     status: "done",
@@ -238,10 +240,12 @@ async function main() {
     }
   });
   const helpableFailureHtml = harness.evaluate("renderWorkshopSlot('ref', readWorkshopState().ref, workshopMetaAlerts(readWorkshopState()))");
-  assert.match(helpableFailureHtml, /workshop-edit is-help-red/);
+  const helpableFailureEspHtml = harness.evaluate("renderWorkshopSlot('esp', readWorkshopState().esp, workshopMetaAlerts(readWorkshopState()))");
+  assert.doesNotMatch(helpableFailureHtml, /workshop-edit/);
   assert.match(helpableFailureHtml, /is-duration-help-red/);
-  assert.doesNotMatch(helpableFailureHtml, /Ayuda recomendada|Ayuda muy recomendable|<small>/);
-  assert.match(helpableFailureHtml, /<span>Editar<\/span><\/button>/);
+  assert.match(helpableFailureEspHtml, /workshop-edit is-help-red/);
+  assert.doesNotMatch(helpableFailureEspHtml, /Ayuda recomendada|Ayuda muy recomendable|<small>/);
+  assert.match(helpableFailureEspHtml, /<span>Editar<\/span><\/button>/);
 
   harness.setState({
     status: "done",
@@ -316,6 +320,12 @@ async function main() {
   await harness.evaluate("openWorkshopPreview()");
   assert.match(previewRequest, /profile=trailer/);
   assert.match(previewRequest, /delay_hint_ms=2000/);
+  const previewHtml = harness.evaluate("renderWorkshopPreviewModal(readWorkshopState())");
+  assert.match(previewHtml, /data-workshop-preview-video="ref"/);
+  assert.match(previewHtml, /data-workshop-preview-video="esp"/);
+  assert.match(previewHtml, /workshop-preview-lane is-esp/);
+  assert.equal((previewHtml.match(/workshop-preview-lane/g) || []).length, 1);
+  assert.doesNotMatch(previewHtml, /workshop-preview-lane is-ref|<span>Bueno<\/span>|<span>Español<\/span>/);
   const mappedPreviewTimes = JSON.parse(harness.evaluate(`JSON.stringify((() => {
     workshopPreviewHintMs = 5000;
     return workshopPreviewTargetTimes(0);

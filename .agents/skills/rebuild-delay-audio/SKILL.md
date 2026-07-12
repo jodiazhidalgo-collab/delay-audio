@@ -23,7 +23,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .agents\skills\rebuild-delay
 
 - No pedir confirmacion para rebuild del servicio principal cuando el cambio lo requiera.
 - No tocar otros servicios.
-- Usar exclusivamente `/volume1/docker/delay-audio/docker-compose.yaml` y el proyecto Compose `delay-audio`.
+- Usar exclusivamente `/volume1/docker/delay audio/docker-compose.yaml` y el proyecto Compose `delay-audio`.
 - No usar el compose maestro de `web` ni conectar el servicio a `web_default`.
 - Usar bloque remoto limpio por SSH; no meter comandos largos con comillas anidadas.
 - Validar siempre contenedor y HTTP `9004`.

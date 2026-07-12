@@ -18,6 +18,8 @@ Taller crea un vídeo final con la imagen y calidad de `Video Bueno` y el audio 
 - `Medir y exportar`: con el híbrido activo solo exporta si la puerta estricta lo autoriza. Una duda del híbrido nunca cae silenciosamente al motor legacy.
 - `Película` y `Tráiler`: seleccionan el perfil de análisis.
 - Selección de pistas, `Editar`, preview, `delayHintMs` y carpeta de salida mantienen su función actual.
+- `Editar` aparece únicamente en `Audio Español`; `Video Bueno` sigue visible como referencia maestra, pero no muestra ese botón.
+- El preview conserva las dos imágenes y muestra una sola línea amarilla para el desplazamiento español. La línea no se arrastra: `-` y `+` la mueven en pasos de 1 segundo, mientras `Play` y `Aceptar` conservan su función.
 - `Editar` abre clips interiores equivalentes, no clips desde `t=0`: 30 segundos alrededor del 45 % del core para Película y 12 segundos alrededor del 40 % para Tráiler. El mapeo aplica el tempo provisional y el hint existente sin salirse de los archivos.
 - `delayHintMs` es solo una semilla. Entra junto a `0`, puede centrar y acelerar el fast path, se abandona si no converge y nunca autoriza por sí solo. La medición final registra si ayudó, fue descartado y su error frente al resultado.
 - El botón solo muestra `Ayuda recomendada` o `Ayuda muy recomendable` cuando existe un hint o resultado fiable que supera los umbrales del perfil. La diferencia total de duración puede avisarse aparte, pero no colorea `Editar` por sí sola.

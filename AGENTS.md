@@ -6,9 +6,9 @@ Responde siempre en espanol y empieza por `Pim Pam`.
 ## Proyecto
 
 - Carpeta Windows: `Z:\delay-audio`
-- Ruta NAS: `/volume1/docker/delay-audio`
+- Ruta NAS: `/volume1/docker/delay audio`
 - SSH NAS: `lacabra@192.168.1.159`
-- Compose propio: `/volume1/docker/delay-audio/docker-compose.yaml`
+- Compose propio: `/volume1/docker/delay audio/docker-compose.yaml`
 - Proyecto Compose: `delay-audio`
 - Servicio y contenedor: `delay-audio`
 - Puerto: `9004`
