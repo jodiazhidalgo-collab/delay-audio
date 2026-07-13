@@ -28,7 +28,7 @@ def identified_tracks(subtitle_titles):
 
 
 class SubtitleExportTests(unittest.TestCase):
-    def test_blackbox_marks_missing_fps_scale_without_changing_the_motor(self):
+    def test_blackbox_marks_applied_fps_scale_as_correct(self):
         job = {
             "fps_audio_path": "audio-fps.mka",
             "fps_correction": {
@@ -42,11 +42,47 @@ class SubtitleExportTests(unittest.TestCase):
             2619,
             [4, 5, 6],
             structure_verified=True,
+            applied_scale=25 / 24,
         )
-        self.assertEqual(evidence["status"], "falta_escala_fps")
+        self.assertEqual(evidence["status"], "correcto")
         self.assertAlmostEqual(evidence["required_scale"], 25 / 24, places=8)
-        self.assertEqual(evidence["applied_scale"], 1.0)
-        self.assertFalse(evidence["scale_matches"])
+        self.assertAlmostEqual(evidence["applied_scale"], 25 / 24, places=8)
+        self.assertTrue(evidence["scale_matches"])
+
+    def test_subtitle_sync_scales_25_to_24_and_keeps_positive_delay(self):
+        scale = routes.escala_temporal_subtitulos({
+            "fps_audio_path": "audio-fps.mka",
+            "fps_correction": {"tempo": 24 / 25},
+        })
+        self.assertAlmostEqual(scale, 25 / 24, places=8)
+        self.assertEqual(
+            routes.mkvmerge_sync_tracks([4, 5], 1000, scale),
+            ["--sync", "4:1000,25/24", "--sync", "5:1000,25/24"],
+        )
+
+    def test_subtitle_sync_scales_24_to_25_and_keeps_negative_delay(self):
+        scale = routes.escala_temporal_subtitulos({
+            "fps_audio_path": "audio-fps.mka",
+            "fps_correction": {"tempo": 25 / 24},
+        })
+        self.assertAlmostEqual(scale, 24 / 25, places=8)
+        self.assertEqual(
+            routes.mkvmerge_sync_tracks([2], -1500, scale),
+            ["--sync", "2:-1500,24/25"],
+        )
+
+    def test_subtitle_sync_preserves_equal_fps_command(self):
+        self.assertEqual(
+            routes.mkvmerge_sync_tracks([2], 0, 1.0),
+            ["--sync", "2:0"],
+        )
+
+    def test_subtitle_sync_rejects_invalid_fps_tempo(self):
+        with self.assertRaisesRegex(RuntimeError, "tempo FPS no valido"):
+            routes.escala_temporal_subtitulos({
+                "fps_audio_path": "audio-fps.mka",
+                "fps_correction": {"tempo": 0},
+            })
 
     def test_blackbox_marks_equal_fps_as_correct_after_structure_check(self):
         evidence = routes.evidencia_sincronizacion_subtitulos(
@@ -83,20 +119,20 @@ class SubtitleExportTests(unittest.TestCase):
         result = {
             "export": {
                 "subtitle_sync": {
-                    "status": "falta_escala_fps",
+                    "status": "correcto",
                     "tracks": 3,
                     "delay_ms": 2619,
                     "esp_fps": 25.0,
                     "ref_fps": 24.0,
                     "required_scale": 1.041666667,
-                    "applied_scale": 1.0,
+                    "applied_scale": 1.041666667,
                     "structure_verified": True,
                 }
             }
         }
         lines = blackbox.subtitle_sync_readme_lines(result)
         self.assertEqual(lines.count("Subtitulos:"), 1)
-        self.assertIn("- estado: falta_escala_fps", lines)
+        self.assertIn("- estado: correcto", lines)
         self.assertIn("- pistas_origen: 3", lines)
         self.assertLessEqual(len(lines), 9)
 

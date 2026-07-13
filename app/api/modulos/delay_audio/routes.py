@@ -11,6 +11,7 @@ import time
 import uuid
 from copy import deepcopy
 from datetime import datetime
+from fractions import Fraction
 
 from api.modulos.delay_audio.memoria import guardar_memoria, leer_memoria
 from api.modulos.diagnostico.blackbox import (
@@ -1926,11 +1927,13 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
             cfg.get("sub_fuente_espanol", DEFAULT_CONFIG["sub_fuente_espanol"]),
         )
         esp_subtitle_track_ids = esp_subtitle_plan["track_ids"]
+        subtitle_time_scale = escala_temporal_subtitulos(job)
         subtitle_sync = evidencia_sincronizacion_subtitulos(
             job,
             delay_ms,
             esp_subtitle_track_ids,
             structure_verified=False,
+            applied_scale=subtitle_time_scale,
         )
         result["export"]["subtitle_sync"] = subtitle_sync
         escribir_json(job["result_path"], result)
@@ -1947,7 +1950,11 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
             level="warning" if subtitle_sync["status"] == "falta_escala_fps" else "info",
         )
         if esp_subtitle_track_ids:
-            cmd.extend(mkvmerge_sync_tracks(esp_subtitle_track_ids, delay_ms))
+            cmd.extend(mkvmerge_sync_tracks(
+                esp_subtitle_track_ids,
+                delay_ms,
+                subtitle_time_scale,
+            ))
             cmd.extend(esp_subtitle_plan["metadata_args"])
             cmd.extend([
                 "--no-video",
@@ -2004,6 +2011,7 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
             delay_ms,
             esp_subtitle_track_ids,
             structure_verified=True,
+            applied_scale=subtitle_time_scale,
         )
         diagnostico_event(
             job,
@@ -3255,11 +3263,29 @@ def mkvmerge_track_ids(path, track_type):
     return ids
 
 
-def mkvmerge_sync_tracks(track_ids, delay_ms):
+def mkvmerge_sync_tracks(track_ids, delay_ms, time_scale=1.0):
+    if not _finite_number(time_scale) or float(time_scale) <= 0:
+        raise RuntimeError("Escala temporal de subtitulos no valida.")
+    scale = float(time_scale)
+    sync_suffix = ""
+    if not math.isclose(scale, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        ratio = Fraction(str(scale)).limit_denominator(1_000_000)
+        sync_suffix = f",{ratio.numerator}/{ratio.denominator}"
     out = []
     for track_id in track_ids:
-        out.extend(["--sync", f"{track_id}:{delay_ms}"])
+        out.extend(["--sync", f"{track_id}:{delay_ms}{sync_suffix}"])
     return out
+
+
+def escala_temporal_subtitulos(job):
+    if not isinstance(job, dict) or not job.get("fps_audio_path"):
+        return 1.0
+    fps = job.get("fps_correction")
+    fps = fps if isinstance(fps, dict) else {}
+    tempo = fps.get("tempo")
+    if not _finite_number(tempo) or float(tempo) <= 0:
+        raise RuntimeError("No se puede sincronizar subtitulos: tempo FPS no valido.")
+    return 1.0 / float(tempo)
 
 
 def evidencia_sincronizacion_subtitulos(
@@ -3274,7 +3300,7 @@ def evidencia_sincronizacion_subtitulos(
     tempo = fps.get("tempo")
     tempo = float(tempo) if _finite_number(tempo) and float(tempo) > 0 else 1.0
     fps_audio_used = bool(isinstance(job, dict) and job.get("fps_audio_path"))
-    required_scale = (1.0 / tempo) if fps_audio_used else 1.0
+    required_scale = escala_temporal_subtitulos(job) if fps_audio_used else 1.0
     applied_scale = float(applied_scale) if _finite_number(applied_scale) else 1.0
     scale_matches = math.isclose(applied_scale, required_scale, rel_tol=0.0, abs_tol=1e-6)
     tracks = len(list(track_ids or []))

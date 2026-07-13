@@ -100,7 +100,7 @@ La única autorización válida es:
 
 `MEDIA`, `ALTA`, `result.ok` o un resultado legacy no sustituyen esta puerta. `Solo medir` se congela al crear el job y no puede convertirse después en exportación por cambiar los ajustes.
 
-La exportación conserva el vídeo bueno, prepara el audio español, sincroniza los subtítulos procedentes de `Audio Español`, crea un MKV temporal y solo lo publica cuando conserva la cantidad y los nombres de todos los subtítulos previstos. El nombre original y su marca de procedencia se separan con ` - `.
+La exportación conserva el vídeo bueno, prepara el audio español y sincroniza los subtítulos procedentes de `Audio Español`. Con FPS distintos confirmados, esos subtítulos reciben la misma transformación temporal que el audio (`tiempo final = tiempo original / tempo + delay`); con FPS iguales solo reciben el delay fijo. Los subtítulos de `Video Bueno` permanecen intactos. La salida se crea como MKV temporal y solo se publica cuando conserva la cantidad y los nombres de todos los subtítulos previstos. El nombre original y su marca de procedencia se separan con ` - `.
 
 ## Temporales y limpieza
 
