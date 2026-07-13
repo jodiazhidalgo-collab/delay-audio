@@ -731,15 +731,14 @@ class DelayAudio:
         return zones
 
     @staticmethod
-    def rank_visual_candidates(clusters, delay_hint_ms=0, limit=4):
+    def rank_visual_candidates(clusters, limit=4):
         candidates = []
         for cluster in clusters[:2]:
             delay = int(cluster.get("delay_ms") or 0)
             if delay not in candidates:
                 candidates.append(delay)
-        for delay in (0, int(delay_hint_ms or 0)):
-            if delay not in candidates:
-                candidates.append(delay)
+        if 0 not in candidates:
+            candidates.append(0)
         return candidates[:max(1, int(limit))]
 
     @staticmethod
@@ -1593,7 +1592,6 @@ class DelayAudio:
             self.diag.event("audio_discovery", "candidate_ranked", "Candidato de audio ordenado", public)
         candidates = self.rank_visual_candidates(
             clusters,
-            self.delay_hint_ms,
             settings["max_visual_candidates"],
         )
         self.diag.event("audio_discovery", "finished", "Descubrimiento de candidatos terminado", {

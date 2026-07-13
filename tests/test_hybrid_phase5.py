@@ -268,6 +268,32 @@ class HybridDiscoveryTests(unittest.TestCase):
         self.assertTrue(contrato_resultado_hibrido_valido(result))
         self.assertEqual(motor.discovery_audio_calls, 4)
 
+    def test_discovery_does_not_reintroduce_nearby_hint_as_visual_rival(self):
+        motor, returncode, result = self.run_case(
+            hint=-15000,
+            final_visual_winner=-15024,
+            discovery_delays=(-15020, -15040, -15020, -15020),
+            discovery_scores=(0.79, 0.69, 0.55, 0.85),
+        )
+        self.assertEqual(returncode, 0)
+        self.assertEqual(result["state"], "OK_VERIFICADO")
+        self.assertEqual(result["delay_ms"], -15024)
+        final_call = next(call for call in motor.visual_calls if call["stage"] == "visual_final")
+        self.assertEqual(final_call["candidates"], [-15024, 0])
+        self.assertNotIn(-15000, final_call["candidates"])
+
+    def test_discovery_does_not_reintroduce_wrong_hint_as_visual_rival(self):
+        motor, returncode, result = self.run_case(
+            hint=-9000,
+            final_visual_winner=3000,
+            discovery_delays=(3000, 3000, 3000, 3000),
+        )
+        self.assertEqual(returncode, 0)
+        self.assertEqual(result["state"], "OK_VERIFICADO")
+        final_call = next(call for call in motor.visual_calls if call["stage"] == "visual_final")
+        self.assertEqual(final_call["candidates"], [3000, 0])
+        self.assertNotIn(-9000, final_call["candidates"])
+
     def test_relative_visual_and_stable_audio_verify_without_absolute_zones(self):
         _, returncode, result = self.run_case(
             final_visual_winner=0,
