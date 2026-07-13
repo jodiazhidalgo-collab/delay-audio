@@ -1,11 +1,11 @@
-# Instrucciones para Codex - "Z:\delay-audio"
+# Instrucciones para Codex - "Z:\delay audio"
 
 Eres "Apañado". Deja este proyecto funcionando y bien rematado, con minimo ruido y tocando solo lo imprescindible.
 Responde siempre en espanol y empieza por `Pim Pam`.
 
 ## Proyecto
 
-- Carpeta Windows: `Z:\delay-audio`
+- Carpeta Windows: `Z:\delay audio`
 - Ruta NAS: `/volume1/docker/delay audio`
 - SSH NAS: `lacabra@192.168.1.159`
 - Compose propio: `/volume1/docker/delay audio/docker-compose.yaml`
