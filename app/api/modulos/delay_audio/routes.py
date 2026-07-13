@@ -981,7 +981,7 @@ def resumen_resultado_diagnostico(result):
     if not isinstance(result, dict):
         return {}
     export = result.get("export") if isinstance(result.get("export"), dict) else {}
-    return {
+    summary = {
         "ok": result.get("ok"),
         "state": result.get("state"),
         "delay_ms": result.get("delay_ms"),
@@ -990,6 +990,10 @@ def resumen_resultado_diagnostico(result):
         "export_status": export.get("status"),
         "profile": result.get("profile"),
     }
+    subtitle_sync = export.get("subtitle_sync")
+    if isinstance(subtitle_sync, dict):
+        summary["subtitle_sync"] = dict(subtitle_sync)
+    return summary
 
 
 def diagnostico_finish(job, status, result=None):
@@ -1865,6 +1869,7 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
     temp_cleanup_paths = []
     cleanup_failures = []
     published_output = False
+    subtitle_sync = None
     try:
         diagnostico_event(job, "normalize_audio", "started", "Preparando audio espanol", {"delay_ms": delay_ms})
         audio_source_path = job.get("esp_audio_medicion") or job.get("fps_audio_path") or job["esp"]
@@ -1921,6 +1926,26 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
             cfg.get("sub_fuente_espanol", DEFAULT_CONFIG["sub_fuente_espanol"]),
         )
         esp_subtitle_track_ids = esp_subtitle_plan["track_ids"]
+        subtitle_sync = evidencia_sincronizacion_subtitulos(
+            job,
+            delay_ms,
+            esp_subtitle_track_ids,
+            structure_verified=False,
+        )
+        result["export"]["subtitle_sync"] = subtitle_sync
+        escribir_json(job["result_path"], result)
+        diagnostico_event(
+            job,
+            "subtitle_sync",
+            "planned",
+            (
+                "Plan de subtitulos sin escala FPS"
+                if subtitle_sync["status"] == "falta_escala_fps"
+                else "Plan de subtitulos preparado"
+            ),
+            subtitle_sync,
+            level="warning" if subtitle_sync["status"] == "falta_escala_fps" else "info",
+        )
         if esp_subtitle_track_ids:
             cmd.extend(mkvmerge_sync_tracks(esp_subtitle_track_ids, delay_ms))
             cmd.extend(esp_subtitle_plan["metadata_args"])
@@ -1974,6 +1999,24 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
         diagnostico_event(job, "verify_final", "started", "Validando salida final", {"output_path": output_path})
         validar_mkv_exportado(output_path, video_duration, expected_subtitle_titles)
         diagnostico_event(job, "verify_final", "finished", "Salida final validada", {"output_path": output_path})
+        subtitle_sync = evidencia_sincronizacion_subtitulos(
+            job,
+            delay_ms,
+            esp_subtitle_track_ids,
+            structure_verified=True,
+        )
+        diagnostico_event(
+            job,
+            "subtitle_sync",
+            "verified",
+            (
+                "Estructura correcta; falta escala FPS en los tiempos"
+                if subtitle_sync["status"] == "falta_escala_fps"
+                else "Subtitulos verificados"
+            ),
+            subtitle_sync,
+            level="warning" if subtitle_sync["status"] == "falta_escala_fps" else "info",
+        )
     except Exception as exc:
         error_phase = fase_error_exportacion(str(exc))
         diagnostico_error(job, diag_classify_error(str(exc)), error_phase, str(exc), {
@@ -1988,6 +2031,8 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
                 "published_output": published_output,
             })
         result["export"] = {"ok": False, "status": "error", "path": output_path}
+        if isinstance(subtitle_sync, dict):
+            result["export"]["subtitle_sync"] = subtitle_sync
         escribir_json(job["result_path"], result)
         escribir_progreso(job, "error", 100, "Aviso")
         if partial_cleanup["remaining"]:
@@ -2003,11 +2048,18 @@ def exportar_si_corresponde(job, final_cleanup_paths=None):
             "path": output_path,
             "reason": "cleanup_failed",
         }
+        if isinstance(subtitle_sync, dict):
+            result["export"]["subtitle_sync"] = subtitle_sync
         escribir_json(job["result_path"], result)
         escribir_progreso(job, "error", 100, "Aviso")
         raise RuntimeError("No se pudieron eliminar todos los temporales de exportación.")
 
-    result["export"] = {"ok": True, "status": "done", "path": output_path}
+    result["export"] = {
+        "ok": True,
+        "status": "done",
+        "path": output_path,
+        "subtitle_sync": subtitle_sync,
+    }
     escribir_json(job["result_path"], result)
     escribir_progreso(job, "done", 100, "Listo")
     log_job(job, f"EXPORTACION OK: {output_path}")
@@ -3208,6 +3260,47 @@ def mkvmerge_sync_tracks(track_ids, delay_ms):
     for track_id in track_ids:
         out.extend(["--sync", f"{track_id}:{delay_ms}"])
     return out
+
+
+def evidencia_sincronizacion_subtitulos(
+    job,
+    delay_ms,
+    track_ids,
+    structure_verified=False,
+    applied_scale=1.0,
+):
+    fps = job.get("fps_correction") if isinstance(job, dict) else {}
+    fps = fps if isinstance(fps, dict) else {}
+    tempo = fps.get("tempo")
+    tempo = float(tempo) if _finite_number(tempo) and float(tempo) > 0 else 1.0
+    fps_audio_used = bool(isinstance(job, dict) and job.get("fps_audio_path"))
+    required_scale = (1.0 / tempo) if fps_audio_used else 1.0
+    applied_scale = float(applied_scale) if _finite_number(applied_scale) else 1.0
+    scale_matches = math.isclose(applied_scale, required_scale, rel_tol=0.0, abs_tol=1e-6)
+    tracks = len(list(track_ids or []))
+    if tracks == 0:
+        status = "sin_subtitulos_origen"
+    elif not scale_matches:
+        status = "falta_escala_fps"
+    elif structure_verified:
+        status = "correcto"
+    else:
+        status = "pendiente_validacion"
+    return {
+        "schema": "subtitle-sync-v1",
+        "status": status,
+        "source": "audio_espanol",
+        "tracks": tracks,
+        "delay_ms": int(round(float(delay_ms or 0))),
+        "fps_audio_used": fps_audio_used,
+        "ref_fps": fps.get("ref_fps"),
+        "esp_fps": fps.get("esp_fps"),
+        "audio_tempo": round(tempo, 9),
+        "required_scale": round(required_scale, 9),
+        "applied_scale": round(applied_scale, 9),
+        "scale_matches": scale_matches,
+        "structure_verified": bool(structure_verified),
+    }
 
 
 def limpiar_texto_mkv(value):

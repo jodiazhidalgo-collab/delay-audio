@@ -10,6 +10,7 @@ if APP_ROOT not in sys.path:
     sys.path.insert(0, APP_ROOT)
 
 from api.modulos.delay_audio import routes  # noqa: E402
+from api.modulos.diagnostico import blackbox  # noqa: E402
 
 
 def identified_tracks(subtitle_titles):
@@ -27,6 +28,78 @@ def identified_tracks(subtitle_titles):
 
 
 class SubtitleExportTests(unittest.TestCase):
+    def test_blackbox_marks_missing_fps_scale_without_changing_the_motor(self):
+        job = {
+            "fps_audio_path": "audio-fps.mka",
+            "fps_correction": {
+                "tempo": 0.96,
+                "ref_fps": 24.0,
+                "esp_fps": 25.0,
+            },
+        }
+        evidence = routes.evidencia_sincronizacion_subtitulos(
+            job,
+            2619,
+            [4, 5, 6],
+            structure_verified=True,
+        )
+        self.assertEqual(evidence["status"], "falta_escala_fps")
+        self.assertAlmostEqual(evidence["required_scale"], 25 / 24, places=8)
+        self.assertEqual(evidence["applied_scale"], 1.0)
+        self.assertFalse(evidence["scale_matches"])
+
+    def test_blackbox_marks_equal_fps_as_correct_after_structure_check(self):
+        evidence = routes.evidencia_sincronizacion_subtitulos(
+            {"fps_correction": {"ref_fps": 23.976024, "esp_fps": 23.976024}},
+            -1000,
+            [2],
+            structure_verified=True,
+        )
+        self.assertEqual(evidence["status"], "correcto")
+        self.assertEqual(evidence["required_scale"], 1.0)
+        self.assertTrue(evidence["scale_matches"])
+
+    def test_blackbox_marks_source_without_subtitles_without_false_warning(self):
+        evidence = routes.evidencia_sincronizacion_subtitulos(
+            {
+                "fps_audio_path": "audio-fps.mka",
+                "fps_correction": {"tempo": 0.96, "ref_fps": 24.0, "esp_fps": 25.0},
+            },
+            2619,
+            [],
+            structure_verified=True,
+        )
+        self.assertEqual(evidence["status"], "sin_subtitulos_origen")
+
+    def test_diagnostic_summary_keeps_compact_subtitle_state(self):
+        sync = {"status": "falta_escala_fps", "tracks": 3}
+        summary = routes.resumen_resultado_diagnostico({
+            "ok": True,
+            "export": {"status": "done", "subtitle_sync": sync},
+        })
+        self.assertEqual(summary["subtitle_sync"], sync)
+
+    def test_blackbox_readme_is_compact(self):
+        result = {
+            "export": {
+                "subtitle_sync": {
+                    "status": "falta_escala_fps",
+                    "tracks": 3,
+                    "delay_ms": 2619,
+                    "esp_fps": 25.0,
+                    "ref_fps": 24.0,
+                    "required_scale": 1.041666667,
+                    "applied_scale": 1.0,
+                    "structure_verified": True,
+                }
+            }
+        }
+        lines = blackbox.subtitle_sync_readme_lines(result)
+        self.assertEqual(lines.count("Subtitulos:"), 1)
+        self.assertIn("- estado: falta_escala_fps", lines)
+        self.assertIn("- pistas_origen: 3", lines)
+        self.assertLessEqual(len(lines), 9)
+
     def test_subtitle_plan_uses_clean_separator_and_one_identify(self):
         source = identified_tracks(["Forzados", ""])
         with patch.object(routes, "mkvmerge_identify", return_value=source) as identify:

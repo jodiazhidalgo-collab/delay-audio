@@ -273,8 +273,29 @@ def write_readme(job):
             f"- export_status: {export.get('status', '')}",
             f"- export_path: {export.get('path', '')}",
         ])
+        lines.extend(subtitle_sync_readme_lines(result))
     with open(job["readme_path"], "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines).rstrip() + "\n")
+
+
+def subtitle_sync_readme_lines(result):
+    if not isinstance(result, dict):
+        return []
+    export = result.get("export") if isinstance(result.get("export"), dict) else {}
+    sync = export.get("subtitle_sync") if isinstance(export.get("subtitle_sync"), dict) else None
+    if not sync:
+        return []
+    return [
+        "",
+        "Subtitulos:",
+        f"- estado: {sync.get('status', '')}",
+        f"- pistas_origen: {sync.get('tracks', 0)}",
+        f"- delay_ms: {sync.get('delay_ms', 0)}",
+        f"- fps: {sync.get('esp_fps', '')} -> {sync.get('ref_fps', '')}",
+        f"- escala_requerida: {sync.get('required_scale', '')}",
+        f"- escala_aplicada: {sync.get('applied_scale', '')}",
+        f"- estructura_verificada: {sync.get('structure_verified', False)}",
+    ]
 
 
 def classify_error(message):

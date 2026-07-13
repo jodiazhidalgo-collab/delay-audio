@@ -41,6 +41,22 @@ function Show-TextTail([string]$Path, [string]$Label, [int]$Lines = 15) {
     }
 }
 
+function Show-SubtitleSync($ResultObject) {
+    if ($null -eq $ResultObject) { return }
+    if (-not ($ResultObject.PSObject.Properties.Name -contains "export")) { return }
+    $export = $ResultObject.export
+    if ($null -eq $export -or -not ($export.PSObject.Properties.Name -contains "subtitle_sync")) { return }
+    $sync = $export.subtitle_sync
+    if ($null -eq $sync) { return }
+    Write-Output "--- SUBTITULOS ---"
+    Write-Output ("ESTADO: {0}" -f $sync.status)
+    Write-Output ("PISTAS_ORIGEN: {0}" -f $sync.tracks)
+    Write-Output ("DELAY_MS: {0}" -f $sync.delay_ms)
+    Write-Output ("FPS: {0} -> {1}" -f $sync.esp_fps, $sync.ref_fps)
+    Write-Output ("ESCALA: requerida {0} | aplicada {1}" -f $sync.required_scale, $sync.applied_scale)
+    Write-Output ("ESTRUCTURA_VERIFICADA: {0}" -f $sync.structure_verified)
+}
+
 switch ($Area) {
     "delay" { $diagRoot = Join-Path $root "logs\delay_audio" }
     "preview" { $diagRoot = Join-Path $root "logs\delay_audio_preview" }
@@ -105,8 +121,10 @@ if (Test-Path -LiteralPath $resultado -PathType Leaf) {
     Write-Output "--- RESULTADO ---"
     $json = Read-JsonSafe $resultado
     Show-SelectedFields $json @("ok", "status", "estado", "error", "codigo_error", "delay_ms", "confidence", "ruta_salida", "output_path")
+    Show-SubtitleSync $json
     if ($json -and $json.PSObject.Properties.Name -contains "result") {
         Show-SelectedFields $json.result @("ok", "status", "estado", "error", "codigo_error", "delay_ms", "confidence", "ruta_salida", "output_path")
+        Show-SubtitleSync $json.result
     }
 } else {
     Write-Output "SIN_RESULTADO_JSON"

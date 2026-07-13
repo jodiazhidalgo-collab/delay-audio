@@ -127,6 +127,7 @@ La trazabilidad mínima incluye:
 - `visual_final.started`, candidatos puntuados y `visual_final.finished`;
 - `decision.ok_verificado` o el estado de rechazo concreto;
 - `export_gate.allowed` o `export_gate.blocked`;
+- `subtitle_sync.planned` y `subtitle_sync.verified` con pistas de origen, delay, FPS, escala temporal requerida y aplicada, y verificación estructural;
 - creación y limpieza de temporales.
 - `decision.final` con estado, delay, autorización y motivo.
 

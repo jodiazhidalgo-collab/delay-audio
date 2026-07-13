@@ -40,6 +40,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .agents\skills\blackbox-revi
 ## Reglas
 
 - No volcar logs enormes.
+- Si `resultado.export.subtitle_sync` existe, mostrar una sola seccion compacta con estado, pistas, delay, FPS, escala requerida/aplicada y verificacion estructural.
 - No mostrar credenciales ni rutas sensibles innecesarias.
 - Si no hay diagnosticos recientes, decirlo claro y no inventar.
 - Si el fallo es visible, la UI manda sobre logs internos.
