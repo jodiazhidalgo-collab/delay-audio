@@ -54,11 +54,13 @@ let itemActionError = "";
 let deleteConfirmMode = false;
 let customMoveState = {
   open: false,
+  mode: "move",
   loading: false,
   error: "",
   parts: [],
   items: [],
-  path: ""
+  path: "",
+  selectedVideoParts: []
 };
 let renameModeActive = false;
 let renameModalItem = null;
@@ -494,7 +496,7 @@ function freshnessClass(timestamp) {
   return "";
 }
 
-function renderItemName(name, target, timestamp = 0) {
+function renderItemName(name, target, timestamp = 0, mode = "full") {
   const freshClass = freshnessClass(timestamp);
   if (!target?.source || !Array.isArray(target.parts) || !target.parts.length) {
     return `<span class="item-name${freshClass}" title="${escapeHtml(name)}">${escapeHtml(name)}</span>`;
@@ -510,13 +512,21 @@ function renderItemName(name, target, timestamp = 0) {
       data-item-parts="${escapeHtml(JSON.stringify(target.parts))}"
       data-item-name="${escapeHtml(name)}"
       data-item-kind="${escapeHtml(target.kind || "file")}"
-      data-item-mode="full"
+      data-item-mode="${escapeHtml(mode)}"
     >${escapeHtml(name)}</button>
   `;
 }
 
 function renderStaticItemName(name, timestamp = 0) {
   return `<span class="item-name${freshnessClass(timestamp)}" title="${escapeHtml(name)}">${escapeHtml(name)}</span>`;
+}
+
+function renderSelectableItemName(name, target, kind, timestamp = 0) {
+  if (kind === "video") return renderItemName(name, target, timestamp);
+  if (kind === "subtitle" && String(name || "").toLowerCase().endsWith(".srt")) {
+    return renderItemName(name, target, timestamp, "subtitle-target");
+  }
+  return renderStaticItemName(name, timestamp);
 }
 
 function renderItemActionIcon(name, target, kind = "file") {
@@ -1730,7 +1740,7 @@ function renderChildren(children, context = {}) {
         return `
           <div class="child">
             ${renderItemActionIcon(child.name, target, kind)}
-            ${kind === "video" ? renderItemName(child.name, target, child.mtime) : renderStaticItemName(child.name, child.mtime)}
+            ${renderSelectableItemName(child.name, target, kind, child.mtime)}
             ${renderItemMeta(child)}
           </div>
         `;
@@ -1893,7 +1903,7 @@ function renderExpandableItem(item, sourceId) {
   return `
     <div class="item">
       ${renderItemActionIcon(item.name, target, kind)}
-      ${kind === "video" ? renderItemName(item.name, target, item.mtime) : renderStaticItemName(item.name, item.mtime)}
+      ${renderSelectableItemName(item.name, target, kind, item.mtime)}
       ${renderItemMeta(item)}
     </div>
     ${renderChildren(item.children, {
@@ -2458,11 +2468,13 @@ function closeItemActionModal() {
 function resetCustomMoveState() {
   customMoveState = {
     open: false,
+    mode: "move",
     loading: false,
     error: "",
     parts: [],
     items: [],
-    path: ""
+    path: "",
+    selectedVideoParts: []
   };
 }
 
@@ -2482,6 +2494,8 @@ function readCustomMoveParts(button) {
 function renderCustomMovePanel() {
   const parts = Array.isArray(customMoveState.parts) ? customMoveState.parts : [];
   const items = Array.isArray(customMoveState.items) ? customMoveState.items : [];
+  const subtitleTargetMode = customMoveState.mode === "subtitle-target";
+  const selectedVideoParts = Array.isArray(customMoveState.selectedVideoParts) ? customMoveState.selectedVideoParts : [];
   const disabled = itemActionBusy ? "disabled" : "";
   const breadcrumbs = [
     `<button class="custom-move-crumb" type="button" data-custom-move-dir data-custom-move-parts="[]" ${disabled}>Media</button>`,
@@ -2501,6 +2515,23 @@ function renderCustomMovePanel() {
       : items.length
         ? items.map((item) => {
           const nextParts = [...parts, item.name];
+          if (subtitleTargetMode && item.kind === "video") {
+            const selected = JSON.stringify(nextParts) === JSON.stringify(selectedVideoParts);
+            return `
+              <button
+                class="custom-move-row custom-move-video ${selected ? "is-selected" : ""}"
+                type="button"
+                data-subtitle-target-video
+                data-custom-move-parts="${customMovePartsValue(nextParts)}"
+                aria-pressed="${selected ? "true" : "false"}"
+                ${disabled}
+              >
+                <span class="custom-move-folder" aria-hidden="true">&#127916;</span>
+                <span class="custom-move-name">${escapeHtml(item.name)}</span>
+                <span class="custom-move-arrow" aria-hidden="true">${selected ? "&#10003;" : ""}</span>
+              </button>
+            `;
+          }
           return `
             <button class="custom-move-row" type="button" data-custom-move-dir data-custom-move-parts="${customMovePartsValue(nextParts)}" ${disabled}>
               <span class="custom-move-folder" aria-hidden="true">&#128193;</span>
@@ -2509,7 +2540,10 @@ function renderCustomMovePanel() {
             </button>
           `;
         }).join("")
-        : `<div class="custom-move-empty">Sin carpetas</div>`;
+        : `<div class="custom-move-empty">${subtitleTargetMode ? "Sin carpetas ni videos MKV" : "Sin carpetas"}</div>`;
+
+  const selectedVideo = selectedVideoParts.length ? selectedVideoParts[selectedVideoParts.length - 1] : "";
+  const actionLabel = selectedVideo ? "Añadir subtítulo" : "Elegir MKV";
 
   return `
     <div class="custom-move-panel">
@@ -2521,7 +2555,9 @@ function renderCustomMovePanel() {
       <div class="custom-move-list">${list}</div>
       <div class="custom-move-footer">
         <button class="item-action-button soft" type="button" data-custom-move-back ${disabled}>Volver</button>
-        <button class="item-action-button output-destination" type="button" data-custom-move-run ${disabled}>Mover aqui</button>
+        ${subtitleTargetMode
+          ? `<button class="item-action-button output-destination visual-pending" type="button" disabled title="Se activará al conectar el motor">${actionLabel}</button>`
+          : `<button class="item-action-button output-destination" type="button" data-custom-move-run ${disabled}>Mover aqui</button>`}
       </div>
     </div>
   `;
@@ -2529,22 +2565,26 @@ function renderCustomMovePanel() {
 
 function closeCustomMoveSelector() {
   if (itemActionBusy) return;
+  const closeDirectSelector = customMoveState.mode === "subtitle-target";
   resetCustomMoveState();
   itemActionError = "";
+  if (closeDirectSelector) actionModalItem = null;
   renderActionModal();
 }
 
-function openCustomMoveSelector() {
+function openCustomMoveSelector(mode = "move") {
   if (!actionModalItem || itemActionBusy) return;
   deleteConfirmMode = false;
   itemActionError = "";
   customMoveState = {
     open: true,
+    mode,
     loading: true,
     error: "",
     parts: [],
     items: [],
-    path: mediaRootPath
+    path: mediaRootPath,
+    selectedVideoParts: []
   };
   renderActionModal();
   loadCustomMoveFolder([]);
@@ -2557,13 +2597,14 @@ async function loadCustomMoveFolder(parts = []) {
     ...customMoveState,
     loading: true,
     error: "",
-    parts: cleanParts
+    parts: cleanParts,
+    selectedVideoParts: []
   };
   renderActionModal();
 
   try {
     const params = new URLSearchParams({
-      v: "seguimiento_move_browse",
+      v: customMoveState.mode === "subtitle-target" ? "seguimiento_subtitle_target_browse" : "seguimiento_move_browse",
       t: String(Date.now())
     });
     cleanParts.forEach((part) => params.append("part", part));
@@ -2572,12 +2613,14 @@ async function loadCustomMoveFolder(parts = []) {
     if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
 
     customMoveState = {
+      ...customMoveState,
       open: true,
       loading: false,
       error: "",
       parts: Array.isArray(data.parts) ? data.parts : cleanParts,
       items: Array.isArray(data.items) ? data.items : [],
-      path: data.path || mediaRootPath
+      path: data.path || mediaRootPath,
+      selectedVideoParts: []
     };
   } catch (error) {
     customMoveState = {
@@ -2836,12 +2879,21 @@ function renderActionModal() {
   modal.querySelectorAll("[data-action-run]").forEach((button) => {
     button.addEventListener("click", () => runItemAction(button.dataset.actionRun));
   });
-  modal.querySelector("[data-custom-move-open]")?.addEventListener("click", openCustomMoveSelector);
+  modal.querySelector("[data-custom-move-open]")?.addEventListener("click", () => openCustomMoveSelector("move"));
   modal.querySelectorAll("[data-custom-move-back]").forEach((button) => {
     button.addEventListener("click", closeCustomMoveSelector);
   });
   modal.querySelectorAll("[data-custom-move-dir]").forEach((button) => {
     button.addEventListener("click", () => loadCustomMoveFolder(readCustomMoveParts(button)));
+  });
+  modal.querySelectorAll("[data-subtitle-target-video]").forEach((button) => {
+    button.addEventListener("click", () => {
+      customMoveState = {
+        ...customMoveState,
+        selectedVideoParts: readCustomMoveParts(button)
+      };
+      renderActionModal();
+    });
   });
   modal.querySelector("[data-custom-move-run]")?.addEventListener("click", runCustomMoveAction);
   modal.querySelectorAll("[data-workshop-select]").forEach((button) => {
@@ -2871,7 +2923,11 @@ function openItemActionModal(button) {
   itemActionError = "";
   deleteConfirmMode = false;
   resetCustomMoveState();
-  renderActionModal();
+  if (actionModalItem.mode === "subtitle-target") {
+    openCustomMoveSelector("subtitle-target");
+  } else {
+    renderActionModal();
+  }
   if (hadSearch) render(lastData);
 }
 

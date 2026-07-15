@@ -9,6 +9,7 @@ from api.modulos.seguimiento.routes import (
     seguimiento_move_browse,
     seguimiento_qbit_delete,
     seguimiento_status,
+    seguimiento_subtitle_target_browse,
     seguimiento_trailer_audio,
     seguimiento_trailer_chapters,
     seguimiento_trailer_delete,
@@ -45,6 +46,8 @@ def respuesta_api(q):
         return seguimiento_media_search(q)
     if v == "seguimiento_move_browse":
         return seguimiento_move_browse(q)
+    if v == "seguimiento_subtitle_target_browse":
+        return seguimiento_subtitle_target_browse(q)
     if v == "seguimiento_item_action":
         return seguimiento_item_action(q)
     if v == "seguimiento_item_rename":

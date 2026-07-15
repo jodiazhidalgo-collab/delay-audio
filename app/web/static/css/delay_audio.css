@@ -1568,6 +1568,17 @@ button.watch-chevron {
   background: rgba(16, 39, 59, .94);
 }
 
+.custom-move-video.is-selected {
+  border-color: rgba(59, 213, 146, .72);
+  background: rgba(20, 91, 67, .78);
+  box-shadow: inset 0 0 0 1px rgba(59, 213, 146, .18);
+}
+
+.custom-move-video.is-selected .custom-move-arrow {
+  color: #91f5c8;
+  font-weight: 950;
+}
+
 .custom-move-folder,
 .custom-move-arrow {
   display: grid;
@@ -1606,6 +1617,10 @@ button.watch-chevron {
   margin-top: 11px;
   padding-top: 11px;
   border-top: 1px solid rgba(145, 160, 177, .16);
+}
+
+.item-action-button.visual-pending:disabled {
+  cursor: default;
 }
 
 .rename-field {

@@ -1455,6 +1455,44 @@ def media_move_folder_items(root, by_activity=True):
     return items
 
 
+def media_subtitle_target_items(root, by_activity=True):
+    folders = []
+    videos = []
+    try:
+        for entry in os.scandir(root):
+            try:
+                if entry.name in {".", ".."}:
+                    continue
+                st = entry.stat(follow_symlinks=False)
+                row = (activity_time(st), normalize_search_text(entry.name), entry.name, st)
+                if entry.is_dir(follow_symlinks=False):
+                    folders.append(row)
+                elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() == ".mkv":
+                    videos.append(row)
+            except OSError as exc:
+                log_error(f"No se pudo leer destino de subtitulo {entry.path}: {exc}")
+    except OSError as exc:
+        log_error(f"No se pudo listar destino de subtitulo {root}: {exc}")
+        return []
+
+    if by_activity:
+        folders.sort(key=lambda row: (-row[0], row[1]))
+        videos.sort(key=lambda row: (-row[0], row[1]))
+    else:
+        folders.sort(key=lambda row: row[1])
+        videos.sort(key=lambda row: row[1])
+
+    items = [
+        {"name": name, "kind": "folder", "mtime": activity_time(st)}
+        for _, _, name, st in folders
+    ]
+    items.extend(
+        {"name": name, "kind": "video", "mtime": activity_time(st)}
+        for _, _, name, st in videos
+    )
+    return items
+
+
 def move_target_to_custom_destination(target, dest_parts):
     destination_folder, clean_parts, error = resolve_media_move_folder(dest_parts)
     if error:
@@ -2089,6 +2127,24 @@ def seguimiento_move_browse(q):
         return {"ok": False, "items": [], "parts": clean_parts, "error": error}
 
     items = media_move_folder_items(folder, by_activity=bool(clean_parts))
+    return {
+        "ok": True,
+        "root": str(MEDIA_MOVE_ROOT),
+        "path": str(folder),
+        "parts": clean_parts,
+        "parent_parts": clean_parts[:-1],
+        "items": items,
+        "count": len(items),
+        "error": "",
+    }
+
+
+def seguimiento_subtitle_target_browse(q):
+    folder, clean_parts, error = resolve_media_move_folder(q.get("part", []))
+    if error:
+        return {"ok": False, "items": [], "parts": clean_parts, "error": error}
+
+    items = media_subtitle_target_items(folder, by_activity=bool(clean_parts))
     return {
         "ok": True,
         "root": str(MEDIA_MOVE_ROOT),
