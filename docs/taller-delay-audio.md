@@ -22,7 +22,7 @@ Taller crea un vídeo final con la imagen y calidad de `Video Bueno` y el audio 
 - El preview conserva las dos imágenes y muestra una sola línea amarilla para el desplazamiento español. La línea no se arrastra: `-` la mueve a la izquierda y retrocede únicamente el vídeo español; `+` la mueve a la derecha y avanza únicamente el vídeo español, siempre en pasos de 1 segundo. `Video Bueno` permanece fijo incluso al cruzar por `0`.
 - `Editar` abre posiciones interiores equivalentes, no clips desde `t=0`, alrededor del 45 % del core para Película y del 40 % para Tráiler. La referencia conserva 30 segundos en Película y 12 en Tráiler; el español prepara un buffer bilateral de hasta 54 y 20 segundos respectivamente para mantener los márgenes de `±24` y `±8` sin mover la referencia. `Play` compara ventanas de 6 y 4 segundos.
 - El número visible expresa el desplazamiento del vídeo español. Al aceptar, la interfaz lo convierte al convenio interno del motor (`tiempo_español = tiempo_referencia - delay`) sin cambiar el signo real usado por medición, FPS o exportación.
-- `delayHintMs` es solo una semilla. Entra junto a `0`, puede centrar y acelerar el fast path y nunca autoriza por sí solo. Si el fast path no cierra, el descubrimiento obtiene sus propios candidatos de audio y la verificación visual final compara únicamente esos candidatos contra `0`: la semilla manual ya no reaparece como rival. La medición final registra si ayudó, fue descartado y su error frente al resultado.
+- `delayHintMs` es solo una semilla. Entra junto a `0`, puede centrar y acelerar el fast path y nunca autoriza por sí solo. Si el fast path no cierra, el descubrimiento obtiene sus propios candidatos de audio y la verificación visual final compara únicamente esos candidatos contra `0`: la semilla manual ya no reaparece como rival. Antes de puntuar, candidatos separados por menos de medio fotograma efectivo se agrupan en una sola posición visual, conservando como representante el primero —el clúster de audio en la fase final— y, por tanto, su delay exacto para exportar. La misma regla se aplica al `0` de control aunque sea implícito, sin convertirlo en candidato base. Con VFR no se aplica esta equivalencia. La medición final registra si la semilla ayudó, fue descartada y su error frente al resultado.
 - El botón solo muestra `Ayuda recomendada` o `Ayuda muy recomendable` cuando existe un hint o resultado fiable que supera los umbrales del perfil. La diferencia total de duración puede avisarse aparte, pero no colorea `Editar` por sí sola.
 
 La pestaña, entradas, pistas, ajustes, trabajo en curso y último resultado se conservan en `localStorage` y deben reaparecer tras recargar.
@@ -36,11 +36,11 @@ El motor separa siempre la evidencia visual de la evidencia de audio:
 2. Todas las posiciones visuales, estrechas, de descubrimiento, expansión, FPS y preview se eligen sobre un `measurement_core` común que excluye introducciones, logos, títulos y colas finales. Los porcentajes son siempre del core del vídeo de referencia.
 3. El audio compara las pistas seleccionadas. Con FPS distintos usa un `.mka` provisional después de descartar VFR no resuelto, pero crear ese temporal no confirma ni aplica todavía la corrección.
 4. El camino rápido necesita coincidencia visual absoluta fuerte y tres anclas interiores de audio coherentes y distribuidas.
-5. Si el camino rápido no cierra, el descubrimiento puede verificar la imagen por vía absoluta o relativa usando los SSIM que ya ha calculado. La vía relativa compara el primer candidato del clúster de audio con el mejor competidor, exige las zonas requeridas del perfil, al menos `max(2, required_strong)` victorias con mejora `>= 0.05`, media `>= 0.08` y cero pérdidas claras. Nunca autoriza sin clúster de audio único, puntuación y dispersión válidas y `timeline_model.compatible == true`.
+5. Si el camino rápido no cierra, el descubrimiento puede verificar la imagen por vía absoluta o relativa usando los SSIM que ya ha calculado. La equivalencia visual usa el menor de medio fotograma de referencia y medio fotograma español trasladado por `tempo`, con límite estricto; ningún grupo puede abarcar ese medio fotograma completo, no se encadena y nunca cambia el valor del representante. El `0` implícito tampoco compite cuando pertenece al mismo grupo. Solo si el único grupo efectivo contiene ese `0`, la vía relativa puede corroborar al representante contra sus controles externos simétricos de `±400 ms`; una pérdida clara continúa bloqueando y agrupar candidatos alejados de `0` no recibe esta autorización. La puerta de exportación comprueba también el grupo, el representante y esos controles. La vía relativa exige las zonas requeridas del perfil, al menos `max(2, required_strong)` victorias con mejora `>= 0.05`, media `>= 0.08` y cero pérdidas claras. Nunca autoriza sin clúster de audio único, puntuación y dispersión válidas y `timeline_model.compatible == true`.
 6. Si falta corroboración, el descubrimiento amplía zonas solo por una duda concreta registrada.
 7. Ningún score aislado, una sola zona o una confianza heredada autorizan exportación.
 
-El resultado híbrido contiene `state`, `delay_ms`, `measurement_core`, `timeline_model`, `edit_hint`, `visual`, `audio`, `fps_correction`, `decision`, `export_allowed` y, si se intentó exportar, `export`. La evidencia visual declara `verification_mode: absolute | relative | none`; el modo relativo conserva objetivo, competidor, zonas comparables, victorias, empates, pérdidas y mejora media.
+El resultado híbrido contiene `state`, `delay_ms`, `measurement_core`, `timeline_model`, `edit_hint`, `visual`, `audio`, `fps_correction`, `decision`, `export_allowed` y, si se intentó exportar, `export`. La evidencia visual declara `verification_mode: absolute | relative | none`; el modo relativo conserva objetivo, competidor, tipo de referencia, zonas comparables, victorias, empates, pérdidas y mejora media. `visual.candidate_equivalence` conserva umbral estricto, FPS, tempo, VFR, candidatos de entrada y efectivos, grupos, incorporación del `0` implícito, representante de `0` y controles externos usados.
 
 ## Perfiles
 
@@ -125,6 +125,7 @@ La trazabilidad mínima incluye:
 - `fps_visual_confirmation.started`, comparación por zona y decisión final;
 - `edit_hint.used`, `edit_hint.helped` o `edit_hint.rejected` cuando existe ayuda;
 - `visual_final.started`, candidatos puntuados y `visual_final.finished`;
+- `visual_final.candidates_grouped` cuando se aplica equivalencia visual, con umbral, grupos y representante conservado;
 - `decision.ok_verificado` o el estado de rechazo concreto;
 - `export_gate.allowed` o `export_gate.blocked`;
 - `subtitle_sync.planned` y `subtitle_sync.verified` con pistas de origen, delay, FPS, escala temporal requerida y aplicada, y verificación estructural;
@@ -142,6 +143,7 @@ Cada evento guarda solo fase, duración, perfil, posición de zona, candidato, p
 - Unitarias de mapeo temporal, signos de delay, límites y planes FPS.
 - Decisiones con una zona, zonas contradictorias, coincidencia, contradicción visual, estados incompletos y errores técnicos.
 - Decisiones absolutas y relativas, incluido SSIM absoluto bajo, cero zonas absolutas válidas, pérdida relativa, audio inestable y objetivo visual distinto del clúster de audio.
+- Equivalencia visual positiva y negativa en `23.976`, `24`, `25`, `30` y `60` FPS, justo dentro, en el límite y fuera de medio fotograma; VFR, no encadenado, controles externos y conservación del delay exacto.
 - Perfiles Película y Tráiler con sus límites propios.
 - `Solo medir` y `Medir y exportar`, incluida la puerta estricta.
 - Material real o controlado con delay positivo, negativo y cero; FPS iguales y conversión confirmada.

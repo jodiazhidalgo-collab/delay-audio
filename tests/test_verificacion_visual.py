@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from itertools import permutations
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -164,6 +165,32 @@ class DecisionTests(unittest.TestCase):
         self.assertFalse(evidence["relative_match"])
         self.assertEqual(evidence["relative_losses"], 1)
 
+    def test_relative_delta_boundaries_are_classified_after_stable_rounding(self):
+        zones = [
+            {
+                "pct": 10,
+                "candidates": [
+                    {"delay_ms": 1000, "mean_ssim": 0.50},
+                    {"delay_ms": 0, "mean_ssim": 0.45},
+                ],
+            },
+            {
+                "pct": 20,
+                "candidates": [
+                    {"delay_ms": 1000, "mean_ssim": 0.45},
+                    {"delay_ms": 0, "mean_ssim": 0.50},
+                ],
+            },
+        ]
+        evidence = VisualVerifier._relative_evidence([1000, 0], zones, self.movie_cfg)
+        self.assertEqual(evidence["relative_wins"], 1)
+        self.assertEqual(evidence["relative_ties"], 1)
+        self.assertEqual(evidence["relative_losses"], 0)
+        self.assertEqual(
+            [item["outcome"] for item in evidence["relative_comparisons"]],
+            ["win", "tie"],
+        )
+
 
 class RelativeVisualVerifier(VisualVerifier):
     def probe_video(self, path):
@@ -300,6 +327,256 @@ class DeterministicFpsVerifier(VisualVerifier):
 
 def fake_meta(path, duration, fps, real_fps=None, vfr=False):
     return VideoMetadata(path, duration, fps, real_fps or fps, 1920, 1080, "yuv420p", "bt709", vfr)
+
+
+class CandidateEquivalenceTests(unittest.TestCase):
+    @staticmethod
+    def equivalence(candidates, ref_fps, esp_fps=None, tempo=1.0, ref_vfr=False, esp_vfr=False):
+        return visual_module._visual_candidate_equivalence(
+            candidates,
+            fake_meta("ref", 100.0, ref_fps, vfr=ref_vfr),
+            fake_meta("esp", 100.0, esp_fps or ref_fps, vfr=esp_vfr),
+            tempo,
+        )
+
+    def test_integer_offsets_strictly_inside_half_frame_are_grouped(self):
+        cases = (
+            (24000 / 1001, 20, 21),
+            (24.0, 20, 21),
+            (25.0, 19, 20),
+            (30.0, 16, 17),
+            (60.0, 8, 9),
+        )
+        for fps, inside, outside in cases:
+            for sign in (-1, 1):
+                with self.subTest(fps=fps, sign=sign, position="inside"):
+                    grouped = self.equivalence([sign * inside, 0], fps)
+                    self.assertTrue(grouped["applied"])
+                    self.assertEqual(grouped["effective_candidates_ms"], [sign * inside])
+                with self.subTest(fps=fps, sign=sign, position="outside"):
+                    separate = self.equivalence([sign * outside, 0], fps)
+                    self.assertFalse(separate["applied"])
+                    self.assertEqual(separate["effective_candidates_ms"], [sign * outside, 0])
+
+    def test_cross_fps_uses_reference_timeline_after_tempo(self):
+        for ref_fps, esp_fps in ((24000 / 1001, 25.0), (25.0, 24000 / 1001)):
+            tempo = ref_fps / esp_fps
+            with self.subTest(ref_fps=ref_fps, esp_fps=esp_fps):
+                inside = 19 if ref_fps == 25.0 else 20
+                grouped = self.equivalence([inside, 0], ref_fps, esp_fps, tempo)
+                self.assertTrue(grouped["applied"])
+                self.assertAlmostEqual(grouped["effective_esp_fps"], ref_fps, places=6)
+
+    def test_first_candidate_is_preserved_as_exact_representative(self):
+        measured_first = self.equivalence([-20, 0], 24.0)
+        zero_first = self.equivalence([0, -20], 24.0)
+        self.assertEqual(measured_first["effective_candidates_ms"], [-20])
+        self.assertEqual(measured_first["zero_representative_ms"], -20)
+        self.assertEqual(zero_first["effective_candidates_ms"], [0])
+        self.assertEqual(zero_first["zero_representative_ms"], 0)
+
+    def test_exact_half_frame_boundary_is_not_grouped(self):
+        for sign in (-1, 1):
+            with self.subTest(sign=sign):
+                result = self.equivalence([sign * 20, 0], 25.0)
+                self.assertFalse(result["applied"])
+                self.assertEqual(result["boundary"], "strict")
+
+    def test_grouping_never_chains_across_more_than_half_frame(self):
+        for ordered in permutations((0, 20, 40)):
+            with self.subTest(ordered=ordered):
+                result = self.equivalence(ordered, 24.0)
+                self.assertEqual(len(result["effective_candidates_ms"]), 2)
+                for group in result["groups"]:
+                    self.assertLess(max(group["members_ms"]) - min(group["members_ms"]), result["threshold_ms"])
+
+    def test_large_and_full_frame_delays_remain_separate(self):
+        for delay in (42, 160, 400, 1000, 5000, 15000):
+            with self.subTest(delay=delay):
+                result = self.equivalence([delay, 0], 24000 / 1001)
+                self.assertFalse(result["applied"])
+                self.assertEqual(result["effective_candidates_ms"], [delay, 0])
+
+    def test_vfr_disables_equivalence_fail_closed(self):
+        for ref_vfr, esp_vfr in ((True, False), (False, True)):
+            with self.subTest(ref_vfr=ref_vfr, esp_vfr=esp_vfr):
+                result = self.equivalence([-20, 0], 24.0, ref_vfr=ref_vfr, esp_vfr=esp_vfr)
+                self.assertFalse(result["applied"])
+                self.assertEqual(result["reason"], "disabled_variable_frame_rate")
+                self.assertEqual(result["effective_candidates_ms"], [-20, 0])
+
+    def test_implicit_zero_is_grouped_without_becoming_a_base_candidate(self):
+        result = self.equivalence([-20], 24.0)
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["implicit_zero_added"])
+        self.assertEqual(result["input_candidates_ms"], [-20])
+        self.assertEqual(result["effective_candidates_ms"], [-20])
+        self.assertEqual(result["groups"][0]["members_ms"], [-20, 0])
+
+    def test_implicit_zero_stays_separate_outside_half_frame(self):
+        result = self.equivalence([-21], 24.0)
+        self.assertFalse(result["applied"])
+        self.assertFalse(result["implicit_zero_added"])
+        self.assertEqual(result["effective_candidates_ms"], [-21])
+
+
+class FrameAwareVisualVerifier(VisualVerifier):
+    def __init__(
+        self,
+        primary=-20,
+        secondary=None,
+        fps=24.0,
+        vfr=False,
+        lose_first_zone=False,
+        primary_score=0.70,
+        secondary_score=0.50,
+        zero_score=0.70,
+        control_score=0.40,
+    ):
+        super().__init__()
+        self.primary = int(primary)
+        self.secondary = int(secondary) if secondary is not None else None
+        self.fps = float(fps)
+        self.vfr = bool(vfr)
+        self.lose_first_zone = bool(lose_first_zone)
+        self.primary_score = float(primary_score)
+        self.secondary_score = float(secondary_score)
+        self.zero_score = float(zero_score)
+        self.control_score = float(control_score)
+
+    def probe_video(self, path):
+        return fake_meta(path, 100.0, self.fps, vfr=self.vfr)
+
+    def score_candidate(self, ref_video, esp_video_original, ref_time, delay_ms, *args, **kwargs):
+        delay = int(delay_ms)
+        if delay == self.primary:
+            score = 0.30 if self.lose_first_zone and ref_time < 40.0 else self.primary_score
+        elif delay == 0:
+            score = self.zero_score
+        elif self.secondary is not None and delay == self.secondary:
+            score = self.secondary_score
+        else:
+            score = self.control_score
+        return {"ok": True, "mean_ssim": score, "frames": 4}
+
+
+class FrameAwareVisualIntegrationTests(unittest.TestCase):
+    def test_current_subframe_case_groups_zero_and_verifies_against_real_rival(self):
+        result = FrameAwareVisualVerifier(secondary=-280).score_candidates(
+            "ref",
+            "esp",
+            [-20, -280, 0],
+            "pelicula",
+            stage="visual_final",
+        )
+        self.assertEqual(result["candidate_delays_ms"], [-20, -280])
+        self.assertEqual(result["candidate_equivalence"]["groups"][0]["members_ms"], [-20, 0])
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["verification_mode"], "relative")
+        self.assertEqual(result["relative_target_delay_ms"], -20)
+        self.assertEqual(result["relative_reference_delay_ms"], -280)
+        self.assertEqual(result["relative_reference_kind"], "candidate")
+        self.assertGreaterEqual(result["relative_wins"], 2)
+        self.assertEqual(result["relative_losses"], 0)
+        self.assertTrue(all("0" not in zone["raw"] for zone in result["zones"]))
+
+    def test_all_collapsed_rivals_must_beat_external_controls(self):
+        result = FrameAwareVisualVerifier().score_candidates(
+            "ref",
+            "esp",
+            [-20, 0],
+            "pelicula",
+            stage="visual_final",
+        )
+        self.assertEqual(result["candidate_delays_ms"], [-20])
+        self.assertEqual(result["candidate_equivalence"]["external_relative_controls_ms"], [-420, 380])
+        self.assertEqual(result["relative_reference_kind"], "external_control")
+        self.assertTrue(result["relative_match"])
+        self.assertEqual(result["verification_mode"], "relative")
+        self.assertTrue(all("0" not in zone["raw"] for zone in result["zones"]))
+
+    def test_external_control_loss_still_blocks(self):
+        result = FrameAwareVisualVerifier(lose_first_zone=True).score_candidates(
+            "ref",
+            "esp",
+            [-20, 0],
+            "pelicula",
+            stage="visual_final",
+        )
+        self.assertGreaterEqual(result["relative_losses"], 1)
+        self.assertFalse(result["relative_match"])
+        self.assertFalse(result["verified"])
+
+    def test_nearly_tied_real_rival_blocks_absolute_and_relative_paths(self):
+        result = FrameAwareVisualVerifier(
+            secondary=-280,
+            primary_score=0.95,
+            secondary_score=0.94,
+            zero_score=0.95,
+        ).score_candidates(
+            "ref",
+            "esp",
+            [-20, -280, 0],
+            "pelicula",
+            stage="visual_final",
+        )
+        self.assertEqual(result["candidate_delays_ms"], [-20, -280])
+        self.assertFalse(result["strong_winner"])
+        self.assertFalse(result["relative_match"])
+        self.assertFalse(result["verified"])
+
+    def test_nearby_nonzero_candidates_do_not_receive_external_controls(self):
+        result = FrameAwareVisualVerifier(primary=1000, secondary=1010).score_candidates(
+            "ref",
+            "esp",
+            [1000, 1010],
+            "pelicula",
+            stage="visual_final",
+        )
+        self.assertEqual(result["candidate_delays_ms"], [1000])
+        self.assertEqual(result["candidate_equivalence"]["external_relative_controls_ms"], [])
+        self.assertNotEqual(result["relative_reference_kind"], "external_control")
+        self.assertFalse(result["verified"])
+
+    def test_single_subframe_candidate_groups_implicit_zero_and_uses_controls(self):
+        result = FrameAwareVisualVerifier().score_candidates(
+            "ref",
+            "esp",
+            [-20],
+            "pelicula",
+            stage="visual_final",
+        )
+        self.assertEqual(result["candidate_delays_ms"], [-20])
+        self.assertTrue(result["candidate_equivalence"]["implicit_zero_added"])
+        self.assertEqual(result["relative_reference_kind"], "external_control")
+        self.assertTrue(result["relative_match"])
+        self.assertTrue(result["verified"])
+
+    def test_just_outside_half_frame_remains_a_real_rival(self):
+        result = FrameAwareVisualVerifier(primary=-21).score_candidates(
+            "ref",
+            "esp",
+            [-21, 0],
+            "pelicula",
+            stage="visual_final",
+        )
+        self.assertEqual(result["candidate_delays_ms"], [-21, 0])
+        self.assertFalse(result["candidate_equivalence"]["applied"])
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["relative_ties"], result["relative_comparable_zones"])
+
+    def test_single_zero_candidate_gets_no_new_relative_authorization(self):
+        result = FrameAwareVisualVerifier(primary=0).score_candidates(
+            "ref",
+            "esp",
+            [0],
+            "pelicula",
+            stage="visual_final",
+        )
+        self.assertFalse(result["candidate_equivalence"]["applied"])
+        self.assertEqual(result["candidate_equivalence"]["external_relative_controls_ms"], [])
+        self.assertFalse(result["relative_match"])
+        self.assertFalse(result["verified"])
 
 
 class FpsConfirmationTests(unittest.TestCase):

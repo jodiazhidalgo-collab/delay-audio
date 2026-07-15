@@ -577,10 +577,39 @@ class VisualVerifier:
         ref_meta = self.probe_video(ref_video)
         esp_meta = self.probe_video(esp_video_original)
         cfg = self.config(profile)
-        base_candidates = _unique_ints(candidate_delays_ms)
-        if not base_candidates:
-            base_candidates = [0]
+        input_candidates = _unique_ints(candidate_delays_ms)
+        if not input_candidates:
+            input_candidates = [0]
+        candidate_equivalence = _visual_candidate_equivalence(
+            input_candidates,
+            ref_meta,
+            esp_meta,
+            tempo,
+        )
+        base_candidates = list(candidate_equivalence["effective_candidates_ms"])
+        zero_reference = int(candidate_equivalence["zero_representative_ms"])
         competitor_ms = int(cfg.get("visual_competitor_ms") or 400)
+        external_relative_controls = []
+        zero_group = next(
+            (
+                item for item in candidate_equivalence["groups"]
+                if 0 in item["members_ms"]
+            ),
+            None,
+        )
+        if (
+            stage == "visual_final"
+            and candidate_equivalence["applied"]
+            and len(base_candidates) == 1
+            and zero_group is not None
+            and len(zero_group["members_ms"]) > 1
+        ):
+            representative = int(base_candidates[0])
+            external_relative_controls = [
+                representative - competitor_ms,
+                representative + competitor_ms,
+            ]
+        candidate_equivalence["external_relative_controls_ms"] = external_relative_controls
         required = int(cfg.get("visual_required_zones") or 1)
         required_strong = int(cfg.get("visual_required_strong") or 1)
         max_zones = int(cfg.get("visual_max_zones") or required)
@@ -598,7 +627,10 @@ class VisualVerifier:
             "candidates": base_candidates,
             "tempo": tempo,
             "measurement_core": measurement_core,
+            "candidate_equivalence": candidate_equivalence,
         })
+        if candidate_equivalence["applied"]:
+            self._event(stage, "candidates_grouped", candidate_equivalence)
 
         for zone in zones:
             if len(zone_results) >= max_zones:
@@ -607,8 +639,8 @@ class VisualVerifier:
             for candidate in base_candidates:
                 evaluated.add(candidate - competitor_ms)
                 evaluated.add(candidate + competitor_ms)
-                if candidate != 0:
-                    evaluated.add(0)
+                if candidate != zero_reference:
+                    evaluated.add(zero_reference)
             raw_scores: dict[int, dict[str, Any]] = {}
             for delay in sorted(evaluated):
                 raw_scores[delay] = self.score_candidate(
@@ -626,8 +658,14 @@ class VisualVerifier:
             for candidate in base_candidates:
                 own = raw_scores.get(candidate) or {}
                 competitors = [candidate - competitor_ms, candidate + competitor_ms]
-                if candidate != 0:
-                    competitors.append(0)
+                if candidate != zero_reference:
+                    competitors.append(zero_reference)
+                if candidate_equivalence["applied"]:
+                    competitors.extend(
+                        item for item in base_candidates
+                        if item != candidate
+                    )
+                competitors = _unique_ints(competitors)
                 competitor_scores = [
                     raw_scores[item]["mean_ssim"]
                     for item in competitors
@@ -698,8 +736,14 @@ class VisualVerifier:
             and winner_wins > runner_wins
         )
         strong_winner = bool(unique_winner and strong_count >= required_strong)
-        relative = self._relative_evidence(base_candidates, zone_results, cfg)
+        relative = self._relative_evidence(
+            base_candidates,
+            zone_results,
+            cfg,
+            external_reference_delays=external_relative_controls,
+        )
         relative_match = bool(stage == "visual_final" and relative["relative_match"])
+        candidate_equivalence["relative_reference_kind"] = relative["relative_reference_kind"]
         verification_mode = (
             "absolute"
             if strong_winner
@@ -715,6 +759,7 @@ class VisualVerifier:
             "tempo": round(_finite_float(tempo, 1.0), 9),
             "measurement_core": measurement_core,
             "candidate_delays_ms": base_candidates,
+            "candidate_equivalence": candidate_equivalence,
             "zones_attempted": len(zone_results),
             "zones_valid": len(valid_zones),
             "zones_strong": strong_count,
@@ -766,12 +811,15 @@ class VisualVerifier:
         base_candidates: list[int],
         zones: list[dict[str, Any]],
         cfg: dict[str, Any],
+        external_reference_delays: Iterable[int | float] | None = None,
     ) -> dict[str, Any]:
-        target = int(base_candidates[0]) if len(base_candidates) >= 2 else None
+        external_references = _unique_ints(external_reference_delays or [])
+        target = int(base_candidates[0]) if len(base_candidates) >= 2 or external_references else None
         required_zones = int(cfg.get("visual_required_zones") or 1)
         required_wins = max(2, int(cfg.get("visual_required_strong") or 1))
         comparisons = []
         reference_counts: dict[int, int] = {}
+        reference_kind_counts: dict[str, int] = {}
         deltas = []
         wins = 0
         ties = 0
@@ -788,18 +836,30 @@ class VisualVerifier:
                     None,
                 )
                 alternatives = [
-                    item for item in candidates
+                    (item, "candidate") for item in candidates
                     if int(item.get("delay_ms") or 0) != target
                 ]
+                raw = zone.get("raw") if isinstance(zone.get("raw"), dict) else {}
+                for delay in external_references:
+                    item = raw.get(str(delay)) if isinstance(raw, dict) else None
+                    if isinstance(item, dict) and item.get("mean_ssim") is not None:
+                        alternatives.append(({
+                            "delay_ms": delay,
+                            "mean_ssim": item["mean_ssim"],
+                        }, "external_control"))
                 if own is None or not alternatives:
                     continue
-                reference = max(alternatives, key=lambda item: float(item["mean_ssim"]))
+                reference, reference_kind = max(
+                    alternatives,
+                    key=lambda item: float(item[0]["mean_ssim"]),
+                )
                 reference_delay = int(reference.get("delay_ms") or 0)
-                delta = float(own["mean_ssim"]) - float(reference["mean_ssim"])
+                delta = round(float(own["mean_ssim"]) - float(reference["mean_ssim"]), 6)
                 if not math.isfinite(delta):
                     continue
                 deltas.append(delta)
                 reference_counts[reference_delay] = reference_counts.get(reference_delay, 0) + 1
+                reference_kind_counts[reference_kind] = reference_kind_counts.get(reference_kind, 0) + 1
                 if delta >= RELATIVE_CLEAR_DELTA:
                     outcome = "win"
                     wins += 1
@@ -813,9 +873,10 @@ class VisualVerifier:
                     "pct": zone.get("pct"),
                     "target_delay_ms": target,
                     "reference_delay_ms": reference_delay,
+                    "reference_kind": reference_kind,
                     "target_ssim": round(float(own["mean_ssim"]), 6),
                     "reference_ssim": round(float(reference["mean_ssim"]), 6),
-                    "delta": round(delta, 6),
+                    "delta": delta,
                     "outcome": outcome,
                 })
 
@@ -830,6 +891,12 @@ class VisualVerifier:
                     -candidate_order.get(value, len(candidate_order)),
                 ),
             )
+        reference_kind = None
+        if reference_kind_counts:
+            reference_kind = max(
+                reference_kind_counts,
+                key=lambda value: reference_kind_counts[value],
+            )
         relative_match = bool(
             target is not None
             and len(deltas) >= required_zones
@@ -840,6 +907,7 @@ class VisualVerifier:
         return {
             "relative_target_delay_ms": target,
             "relative_reference_delay_ms": reference_delay,
+            "relative_reference_kind": reference_kind,
             "relative_comparable_zones": len(deltas),
             "relative_required_zones": required_zones,
             "relative_required_wins": required_wins,
@@ -1084,6 +1152,94 @@ def _parse_duration(value: Any) -> float:
     if not match:
         return 0.0
     return int(match.group(1)) * 3600.0 + int(match.group(2)) * 60.0 + float(match.group(3))
+
+
+def _visual_candidate_equivalence(
+    values: Iterable[int | float],
+    ref_meta: VideoMetadata,
+    esp_meta: VideoMetadata,
+    tempo: int | float,
+) -> dict[str, Any]:
+    candidates = _unique_ints(values)
+    tempo_value = _finite_float(tempo, 0.0)
+    ref_fps = _finite_float(ref_meta.avg_fps, 0.0)
+    esp_fps = _finite_float(esp_meta.avg_fps, 0.0)
+    effective_esp_fps = esp_fps * tempo_value
+    variable_frame_rate = bool(ref_meta.variable_frame_rate or esp_meta.variable_frame_rate)
+
+    if variable_frame_rate:
+        threshold_ms = 0.0
+        reason = "disabled_variable_frame_rate"
+    elif ref_fps <= 0.0 or esp_fps <= 0.0 or effective_esp_fps <= 0.0:
+        threshold_ms = 0.0
+        reason = "disabled_invalid_fps_or_tempo"
+    else:
+        threshold_ms = min(500.0 / ref_fps, 500.0 / effective_esp_fps)
+        reason = "no_equivalent_candidates"
+
+    groups: list[dict[str, Any]] = []
+    for candidate in candidates:
+        group = next(
+            (
+                item for item in groups
+                if threshold_ms > 0.0
+                and (
+                    max([int(candidate), *item["members_ms"]])
+                    - min([int(candidate), *item["members_ms"]])
+                ) < threshold_ms
+            ),
+            None,
+        )
+        if group is None:
+            groups.append({
+                "representative_ms": int(candidate),
+                "members_ms": [int(candidate)],
+            })
+        else:
+            group["members_ms"].append(int(candidate))
+
+    implicit_zero_added = False
+    if 0 not in candidates and threshold_ms > 0.0:
+        zero_group = next(
+            (
+                item for item in groups
+                if (
+                    max([0, *item["members_ms"]])
+                    - min([0, *item["members_ms"]])
+                ) < threshold_ms
+            ),
+            None,
+        )
+        if zero_group is not None:
+            zero_group["members_ms"].append(0)
+            implicit_zero_added = True
+
+    applied = any(len(item["members_ms"]) > 1 for item in groups)
+    if applied:
+        reason = "half_frame_equivalence_applied"
+    effective = [int(item["representative_ms"]) for item in groups]
+    zero_representative = 0
+    zero_group = next((item for item in groups if 0 in item["members_ms"]), None)
+    if zero_group is not None:
+        zero_representative = int(zero_group["representative_ms"])
+
+    return {
+        "applied": applied,
+        "reason": reason,
+        "boundary": "strict",
+        "threshold_ms": round(threshold_ms, 6),
+        "ref_fps": round(ref_fps, 9),
+        "esp_fps": round(esp_fps, 9),
+        "effective_esp_fps": round(effective_esp_fps, 9),
+        "tempo": round(tempo_value, 12),
+        "ref_variable_frame_rate": bool(ref_meta.variable_frame_rate),
+        "esp_variable_frame_rate": bool(esp_meta.variable_frame_rate),
+        "input_candidates_ms": candidates,
+        "effective_candidates_ms": effective,
+        "groups": groups,
+        "zero_representative_ms": zero_representative,
+        "implicit_zero_added": implicit_zero_added,
+    }
 
 
 def _unique_ints(values: Iterable[int | float]) -> list[int]:

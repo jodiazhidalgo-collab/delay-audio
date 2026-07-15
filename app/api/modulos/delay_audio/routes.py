@@ -528,8 +528,276 @@ def fingerprint_config_hibrida(profile, enabled, visual_method, profile_config):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
+def _candidate_equivalence_valid(visual):
+    equivalence = visual.get("candidate_equivalence")
+    if equivalence is None:
+        return True
+    if not isinstance(equivalence, dict):
+        return False
+    integer_list_fields = ("input_candidates_ms", "effective_candidates_ms")
+    if not all(
+        isinstance(equivalence.get(key), list)
+        and equivalence[key]
+        and all(isinstance(value, int) and not isinstance(value, bool) for value in equivalence[key])
+        for key in integer_list_fields
+    ):
+        return False
+    input_candidates = equivalence["input_candidates_ms"]
+    effective_candidates = equivalence["effective_candidates_ms"]
+    if len(set(input_candidates)) != len(input_candidates):
+        return False
+    numeric_fields = ("threshold_ms", "ref_fps", "esp_fps", "effective_esp_fps", "tempo")
+    if not all(_finite_number(equivalence.get(key)) for key in numeric_fields):
+        return False
+    if not (
+        equivalence.get("boundary") == "strict"
+        and isinstance(equivalence.get("applied"), bool)
+        and isinstance(equivalence.get("implicit_zero_added"), bool)
+        and isinstance(equivalence.get("ref_variable_frame_rate"), bool)
+        and isinstance(equivalence.get("esp_variable_frame_rate"), bool)
+        and isinstance(equivalence.get("zero_representative_ms"), int)
+        and not isinstance(equivalence.get("zero_representative_ms"), bool)
+        and visual.get("candidate_delays_ms") == effective_candidates
+    ):
+        return False
+
+    ref_fps = float(equivalence["ref_fps"])
+    esp_fps = float(equivalence["esp_fps"])
+    tempo = float(equivalence["tempo"])
+    effective_esp_fps = float(equivalence["effective_esp_fps"])
+    variable_frame_rate = bool(
+        equivalence["ref_variable_frame_rate"]
+        or equivalence["esp_variable_frame_rate"]
+    )
+    if variable_frame_rate:
+        expected_threshold = 0.0
+        expected_reason = "disabled_variable_frame_rate"
+    elif ref_fps <= 0.0 or esp_fps <= 0.0 or tempo <= 0.0 or effective_esp_fps <= 0.0:
+        expected_threshold = 0.0
+        expected_reason = "disabled_invalid_fps_or_tempo"
+    else:
+        if not math.isclose(
+            effective_esp_fps,
+            esp_fps * tempo,
+            rel_tol=1e-8,
+            abs_tol=1e-8,
+        ):
+            return False
+        expected_threshold = min(500.0 / ref_fps, 500.0 / effective_esp_fps)
+        expected_reason = "no_equivalent_candidates"
+    if not math.isclose(
+        float(equivalence["threshold_ms"]),
+        round(expected_threshold, 6),
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        return False
+
+    expected_groups = []
+    for candidate in input_candidates:
+        group = next(
+            (
+                item for item in expected_groups
+                if expected_threshold > 0.0
+                and max([candidate, *item["members_ms"]]) - min([candidate, *item["members_ms"]])
+                < expected_threshold
+            ),
+            None,
+        )
+        if group is None:
+            expected_groups.append({"representative_ms": candidate, "members_ms": [candidate]})
+        else:
+            group["members_ms"].append(candidate)
+
+    implicit_zero_added = False
+    if 0 not in input_candidates and expected_threshold > 0.0:
+        zero_group = next(
+            (
+                item for item in expected_groups
+                if max([0, *item["members_ms"]]) - min([0, *item["members_ms"]])
+                < expected_threshold
+            ),
+            None,
+        )
+        if zero_group is not None:
+            zero_group["members_ms"].append(0)
+            implicit_zero_added = True
+
+    groups = equivalence.get("groups")
+    if not isinstance(groups, list) or len(groups) != len(expected_groups):
+        return False
+    for actual, expected in zip(groups, expected_groups):
+        if not (
+            isinstance(actual, dict)
+            and actual.get("representative_ms") == expected["representative_ms"]
+            and actual.get("members_ms") == expected["members_ms"]
+        ):
+            return False
+    expected_applied = any(len(item["members_ms"]) > 1 for item in expected_groups)
+    if expected_applied:
+        expected_reason = "half_frame_equivalence_applied"
+    zero_group = next((item for item in expected_groups if 0 in item["members_ms"]), None)
+    expected_zero_representative = int(zero_group["representative_ms"]) if zero_group else 0
+    return bool(
+        equivalence["applied"] is expected_applied
+        and equivalence["implicit_zero_added"] is implicit_zero_added
+        and equivalence.get("reason") == expected_reason
+        and effective_candidates == [int(item["representative_ms"]) for item in expected_groups]
+        and equivalence["zero_representative_ms"] == expected_zero_representative
+    )
+
+
+def _external_relative_evidence_valid(visual):
+    equivalence = visual.get("candidate_equivalence")
+    if not isinstance(equivalence, dict) or equivalence.get("applied") is not True:
+        return False
+    effective = equivalence.get("effective_candidates_ms")
+    candidate_delays = visual.get("candidate_delays_ms")
+    groups = equivalence.get("groups")
+    controls = equivalence.get("external_relative_controls_ms")
+    target = visual.get("relative_target_delay_ms")
+    reference = visual.get("relative_reference_delay_ms")
+    if not (
+        isinstance(effective, list)
+        and len(effective) == 1
+        and _finite_number(effective[0])
+        and candidate_delays == effective
+        and _finite_number(target)
+        and float(effective[0]) == float(target)
+        and isinstance(groups, list)
+        and len(groups) == 1
+        and isinstance(groups[0], dict)
+        and isinstance(groups[0].get("members_ms"), list)
+        and len(groups[0]["members_ms"]) >= 2
+        and 0 in groups[0]["members_ms"]
+        and _finite_number(groups[0].get("representative_ms"))
+        and float(groups[0]["representative_ms"]) == float(target)
+        and isinstance(controls, list)
+        and len(controls) == 2
+        and all(_finite_number(value) for value in controls)
+        and len({float(value) for value in controls}) == 2
+        and _finite_number(reference)
+        and float(reference) in {float(value) for value in controls}
+        and equivalence.get("relative_reference_kind") == "external_control"
+        and equivalence.get("ref_variable_frame_rate") is False
+        and equivalence.get("esp_variable_frame_rate") is False
+    ):
+        return False
+    left, right = sorted(float(value) for value in controls)
+    target_value = float(target)
+    if not (
+        math.isclose(left, target_value - 400.0, rel_tol=0.0, abs_tol=1e-9)
+        and math.isclose(right, target_value + 400.0, rel_tol=0.0, abs_tol=1e-9)
+    ):
+        return False
+    comparisons = visual.get("relative_comparisons")
+    comparable = visual.get("relative_comparable_zones")
+    if not (
+        isinstance(comparable, int)
+        and not isinstance(comparable, bool)
+        and isinstance(comparisons, list)
+        and len(comparisons) == comparable
+        and comparisons
+    ):
+        return False
+    outcomes = {"win": 0, "tie": 0, "loss": 0}
+    deltas = []
+    for item in comparisons:
+        if not (
+            isinstance(item, dict)
+            and item.get("reference_kind") == "external_control"
+            and _finite_number(item.get("target_delay_ms"))
+            and float(item["target_delay_ms"]) == target_value
+            and _finite_number(item.get("reference_delay_ms"))
+            and float(item["reference_delay_ms"]) in {left, right}
+            and _finite_number(item.get("delta"))
+            and item.get("outcome") in outcomes
+        ):
+            return False
+        delta = float(item["delta"])
+        expected_outcome = "win" if delta >= 0.05 else "loss" if delta < -0.05 else "tie"
+        if item["outcome"] != expected_outcome:
+            return False
+        outcomes[expected_outcome] += 1
+        deltas.append(delta)
+    return bool(
+        outcomes["win"] == visual.get("relative_wins")
+        and outcomes["tie"] == visual.get("relative_ties")
+        and outcomes["loss"] == visual.get("relative_losses")
+        and _finite_number(visual.get("relative_mean_delta"))
+        and math.isclose(
+            sum(deltas) / len(deltas),
+            float(visual["relative_mean_delta"]),
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        )
+    )
+
+
+def _candidate_relative_evidence_valid(visual):
+    candidates = visual.get("candidate_delays_ms")
+    target = visual.get("relative_target_delay_ms")
+    reference = visual.get("relative_reference_delay_ms")
+    if not (
+        isinstance(candidates, list)
+        and len(candidates) >= 2
+        and all(isinstance(value, int) and not isinstance(value, bool) for value in candidates)
+        and _finite_number(target)
+        and float(target) == float(candidates[0])
+        and _finite_number(reference)
+        and float(reference) in {float(value) for value in candidates[1:]}
+    ):
+        return False
+    comparisons = visual.get("relative_comparisons")
+    comparable = visual.get("relative_comparable_zones")
+    if not (
+        isinstance(comparable, int)
+        and not isinstance(comparable, bool)
+        and isinstance(comparisons, list)
+        and len(comparisons) == comparable
+        and comparisons
+    ):
+        return False
+    target_value = float(target)
+    allowed_references = {float(value) for value in candidates[1:]}
+    outcomes = {"win": 0, "tie": 0, "loss": 0}
+    deltas = []
+    for item in comparisons:
+        if not (
+            isinstance(item, dict)
+            and item.get("reference_kind") == "candidate"
+            and _finite_number(item.get("target_delay_ms"))
+            and float(item["target_delay_ms"]) == target_value
+            and _finite_number(item.get("reference_delay_ms"))
+            and float(item["reference_delay_ms"]) in allowed_references
+            and _finite_number(item.get("delta"))
+            and item.get("outcome") in outcomes
+        ):
+            return False
+        delta = float(item["delta"])
+        expected_outcome = "win" if delta >= 0.05 else "loss" if delta < -0.05 else "tie"
+        if item["outcome"] != expected_outcome:
+            return False
+        outcomes[expected_outcome] += 1
+        deltas.append(delta)
+    return bool(
+        outcomes["win"] == visual.get("relative_wins")
+        and outcomes["tie"] == visual.get("relative_ties")
+        and outcomes["loss"] == visual.get("relative_losses")
+        and _finite_number(visual.get("relative_mean_delta"))
+        and math.isclose(
+            sum(deltas) / len(deltas),
+            float(visual["relative_mean_delta"]),
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        )
+    )
+
+
 def _hybrid_visual_evidence(visual, audio):
     if not isinstance(visual, dict) or visual.get("verified") is not True:
+        return False
+    if not _candidate_equivalence_valid(visual):
         return False
     if visual.get("stage") == "fps_visual_confirmation":
         if visual.get("absolute_match") is True:
@@ -552,8 +820,43 @@ def _hybrid_visual_evidence(visual, audio):
     if mode not in {"absolute", "relative", "none"}:
         mode = "absolute" if visual.get("strong_winner") is True else "none"
     if mode == "absolute":
-        return visual.get("strong_winner") is True
+        if visual.get("strong_winner") is not True:
+            return False
+        equivalence = visual.get("candidate_equivalence")
+        if isinstance(equivalence, dict):
+            winner = visual.get("winner_delay_ms")
+            candidates = visual.get("candidate_delays_ms")
+            audio_delay = audio.get("delay_ms") if isinstance(audio, dict) else None
+            tolerance_ms = audio.get("tolerance_ms") if isinstance(audio, dict) else None
+            return bool(
+                _finite_number(winner)
+                and isinstance(candidates, list)
+                and float(winner) in {float(value) for value in candidates}
+                and _finite_number(audio_delay)
+                and _finite_number(tolerance_ms)
+                and float(tolerance_ms) >= 0.0
+                and abs(float(audio_delay) - float(winner)) <= float(tolerance_ms)
+            )
+        return True
     if mode != "relative" or visual.get("relative_match") is not True:
+        return False
+    reference_kind = str(visual.get("relative_reference_kind") or "").strip().lower()
+    equivalence = visual.get("candidate_equivalence")
+    declared_controls = (
+        equivalence.get("external_relative_controls_ms")
+        if isinstance(equivalence, dict)
+        else None
+    )
+    if reference_kind == "external_control" or declared_controls:
+        if not _external_relative_evidence_valid(visual):
+            return False
+    elif reference_kind == "candidate":
+        if not _candidate_relative_evidence_valid(visual):
+            return False
+    elif reference_kind == "":
+        if isinstance(equivalence, dict):
+            return False
+    else:
         return False
 
     integer_fields = (

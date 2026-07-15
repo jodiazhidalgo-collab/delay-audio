@@ -21,6 +21,7 @@ for path in (APP_ROOT, MOTOR_ROOT):
 from api.modulos.delay_audio.routes import contrato_resultado_hibrido_valido  # noqa: E402
 import diagnostico_job  # noqa: E402
 from medir_delay_audio import DelayAudio  # noqa: E402
+from verificacion_visual import VideoMetadata, VisualVerifier  # noqa: E402
 
 
 class StagedVisualVerifier:
@@ -176,6 +177,46 @@ class DeterministicDiscoveryMotor(DelayAudio):
         }
 
 
+class FrameAwareHybridVerifier(VisualVerifier):
+    def probe_video(self, path):
+        return VideoMetadata(path, 8056.424, 24.0, 24.0, 1920, 1080, "yuv420p", "bt709", False)
+
+    def score_candidate(self, ref_video, esp_video_original, ref_time, delay_ms, *args, **kwargs):
+        delay = int(delay_ms)
+        if delay in {-20, 0}:
+            score = 0.70
+        elif delay == -280:
+            score = 0.50
+        else:
+            score = 0.40
+        return {"ok": True, "mean_ssim": score, "frames": 4}
+
+
+class FrameAwareDiscoveryMotor(DeterministicDiscoveryMotor):
+    def create_visual_verifier(self):
+        return FrameAwareHybridVerifier()
+
+
+class FrameAwareFastPathVerifier(FrameAwareHybridVerifier):
+    def score_candidate(self, ref_video, esp_video_original, ref_time, delay_ms, *args, **kwargs):
+        result = super().score_candidate(
+            ref_video,
+            esp_video_original,
+            ref_time,
+            delay_ms,
+            *args,
+            **kwargs,
+        )
+        if int(delay_ms) in {-20, 0, 20}:
+            result["mean_ssim"] = 0.95
+        return result
+
+
+class FrameAwareFastPathMotor(DeterministicDiscoveryMotor):
+    def create_visual_verifier(self):
+        return FrameAwareFastPathVerifier()
+
+
 class AtomicDiagnosticWriteTests(unittest.TestCase):
     def test_transient_smb_replace_lock_is_retried_without_leaving_temp_files(self):
         runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
@@ -267,6 +308,69 @@ class HybridDiscoveryTests(unittest.TestCase):
         self.assertIn(0, result["audio"]["candidate_delays_ms"])
         self.assertTrue(contrato_resultado_hibrido_valido(result))
         self.assertEqual(motor.discovery_audio_calls, 4)
+
+    def test_subframe_zero_rival_is_grouped_by_real_visual_verifier(self):
+        runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
+        os.makedirs(runtime_root, exist_ok=True)
+        job_dir = os.path.join(runtime_root, f"phase5-frame-aware-{uuid.uuid4().hex}")
+        motor = FrameAwareDiscoveryMotor(
+            job_dir,
+            discovery_delays=(-280, -20, -20, -20),
+            discovery_scores=(0.56, 0.72, 0.63, 0.68),
+        )
+        try:
+            motor.reset_logs()
+            motor.diag.init(inputs={"synthetic": True}, settings={"hybrid_enabled": True})
+            returncode = motor.run_hybrid_fast_path(8056.424, 8054.432, 0, 0)
+            with open(motor.result_path, "r", encoding="utf-8") as handle:
+                result = json.load(handle)
+        finally:
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(result["state"], "OK_VERIFICADO")
+        self.assertTrue(result["export_allowed"])
+        self.assertEqual(result["delay_ms"], -20)
+        self.assertEqual(result["visual"]["candidate_delays_ms"], [-20, -280])
+        self.assertEqual(result["visual"]["verification_mode"], "relative")
+        self.assertEqual(result["visual"]["relative_target_delay_ms"], -20)
+        self.assertTrue(result["visual"]["candidate_equivalence"]["applied"])
+        self.assertNotIn("visual_final_not_verified", result["decision"]["contradictions"])
+        self.assertNotIn("audio_does_not_support_visual_winner", result["decision"]["contradictions"])
+        self.assertTrue(contrato_resultado_hibrido_valido(result))
+
+    def test_subframe_edit_hints_keep_fast_path_zero_reference_and_exact_audio_delay(self):
+        cases = ((20, 20), (-20, -20), (20, 0))
+        for hint, audio_delay in cases:
+            with self.subTest(hint=hint, audio_delay=audio_delay):
+                runtime_root = os.path.join(PROJECT_ROOT, "_codex_runtime", "tmp")
+                os.makedirs(runtime_root, exist_ok=True)
+                job_dir = os.path.join(runtime_root, f"phase5-frame-hint-{uuid.uuid4().hex}")
+                motor = FrameAwareFastPathMotor(
+                    job_dir,
+                    hint=hint,
+                    fast_audio_delays=(audio_delay, audio_delay, audio_delay),
+                )
+                try:
+                    motor.reset_logs()
+                    motor.diag.init(inputs={"synthetic": True}, settings={"hybrid_enabled": True})
+                    returncode = motor.run_hybrid_fast_path(8056.424, 8056.424, 0, 0)
+                    with open(motor.result_path, "r", encoding="utf-8") as handle:
+                        result = json.load(handle)
+                finally:
+                    shutil.rmtree(job_dir, ignore_errors=True)
+
+                self.assertEqual(returncode, 0)
+                self.assertEqual(result["state"], "OK_VERIFICADO")
+                self.assertEqual(result["delay_ms"], audio_delay)
+                self.assertEqual(result["visual"]["candidate_delays_ms"], [0])
+                self.assertEqual(result["visual"]["candidate_equivalence"]["groups"][0]["members_ms"], [0, hint])
+                self.assertEqual(
+                    result["visual"]["candidate_equivalence"]["external_relative_controls_ms"],
+                    [],
+                )
+                self.assertEqual(result["visual"]["verification_mode"], "absolute")
+                self.assertTrue(contrato_resultado_hibrido_valido(result))
 
     def test_discovery_does_not_reintroduce_nearby_hint_as_visual_rival(self):
         motor, returncode, result = self.run_case(

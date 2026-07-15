@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import sys
@@ -123,6 +124,249 @@ class HybridResultContractTests(unittest.TestCase):
         result = verified_result(delay_ms=-1000, visual=visual, audio=audio)
         self.assertEqual(result["state"], "OK_VERIFICADO")
         self.assertTrue(routes.exportacion_hibrida_autorizada(result))
+
+    def test_external_control_relative_result_requires_complete_equivalence_contract(self):
+        visual = {
+            "verified": True,
+            "verification_mode": "relative",
+            "strong_winner": False,
+            "relative_supported": True,
+            "relative_match": True,
+            "relative_target_delay_ms": -20,
+            "relative_reference_delay_ms": -420,
+            "relative_reference_kind": "external_control",
+            "relative_comparable_zones": 3,
+            "relative_required_zones": 3,
+            "relative_required_wins": 2,
+            "relative_wins": 3,
+            "relative_ties": 0,
+            "relative_losses": 0,
+            "relative_mean_delta": 0.20,
+            "candidate_delays_ms": [-20],
+            "relative_comparisons": [
+                {
+                    "target_delay_ms": -20,
+                    "reference_delay_ms": -420,
+                    "reference_kind": "external_control",
+                    "delta": 0.20,
+                    "outcome": "win",
+                }
+                for _ in range(3)
+            ],
+            "candidate_equivalence": {
+                "applied": True,
+                "reason": "half_frame_equivalence_applied",
+                "boundary": "strict",
+                "threshold_ms": 20.833333,
+                "ref_fps": 24.0,
+                "esp_fps": 24.0,
+                "effective_esp_fps": 24.0,
+                "tempo": 1.0,
+                "ref_variable_frame_rate": False,
+                "esp_variable_frame_rate": False,
+                "input_candidates_ms": [-20, 0],
+                "effective_candidates_ms": [-20],
+                "groups": [{"representative_ms": -20, "members_ms": [-20, 0]}],
+                "zero_representative_ms": -20,
+                "implicit_zero_added": False,
+                "external_relative_controls_ms": [-420, 380],
+                "relative_reference_kind": "external_control",
+            },
+        }
+        audio = {"supporting_zones": 4, "delay_ms": -20, "tolerance_ms": 160}
+        accepted = verified_result(delay_ms=-20, visual=visual, audio=audio)
+        self.assertEqual(accepted["state"], "OK_VERIFICADO")
+        self.assertTrue(routes.exportacion_hibrida_autorizada(accepted))
+
+        invalid_variants = []
+        missing_equivalence = copy.deepcopy(visual)
+        missing_equivalence.pop("candidate_equivalence")
+        invalid_variants.append(missing_equivalence)
+        not_applied = copy.deepcopy(visual)
+        not_applied["candidate_equivalence"]["applied"] = False
+        invalid_variants.append(not_applied)
+        group_without_zero = copy.deepcopy(visual)
+        group_without_zero["candidate_equivalence"]["groups"][0]["members_ms"] = [-20, -10]
+        invalid_variants.append(group_without_zero)
+        missing_controls = copy.deepcopy(visual)
+        missing_controls["candidate_equivalence"]["external_relative_controls_ms"] = []
+        invalid_variants.append(missing_controls)
+        mismatched_target = copy.deepcopy(visual)
+        mismatched_target["candidate_equivalence"]["effective_candidates_ms"] = [-21]
+        invalid_variants.append(mismatched_target)
+        variable_frame_rate = copy.deepcopy(visual)
+        variable_frame_rate["candidate_equivalence"]["ref_variable_frame_rate"] = True
+        invalid_variants.append(variable_frame_rate)
+        inconsistent_comparisons = copy.deepcopy(visual)
+        inconsistent_comparisons["relative_comparisons"][0]["outcome"] = "tie"
+        invalid_variants.append(inconsistent_comparisons)
+        impossible_span = copy.deepcopy(visual)
+        impossible_span["candidate_delays_ms"] = [-1000]
+        impossible_span["relative_target_delay_ms"] = -1000
+        impossible_span["relative_reference_delay_ms"] = -1400
+        impossible_span["candidate_equivalence"].update({
+            "input_candidates_ms": [-1000, 0],
+            "effective_candidates_ms": [-1000],
+            "groups": [{"representative_ms": -1000, "members_ms": [-1000, 0]}],
+            "zero_representative_ms": -1000,
+            "external_relative_controls_ms": [-1400, -600],
+        })
+        for comparison in impossible_span["relative_comparisons"]:
+            comparison["target_delay_ms"] = -1000
+            comparison["reference_delay_ms"] = -1400
+        invalid_variants.append(impossible_span)
+        collapsed_group_faking_candidate_reference = copy.deepcopy(visual)
+        collapsed_group_faking_candidate_reference["relative_reference_kind"] = "candidate"
+        collapsed_group_faking_candidate_reference["relative_reference_delay_ms"] = 0
+        collapsed_group_faking_candidate_reference["candidate_equivalence"]["external_relative_controls_ms"] = []
+        collapsed_group_faking_candidate_reference["candidate_equivalence"]["relative_reference_kind"] = "candidate"
+        for comparison in collapsed_group_faking_candidate_reference["relative_comparisons"]:
+            comparison["reference_kind"] = "candidate"
+            comparison["reference_delay_ms"] = 0
+        invalid_variants.append(collapsed_group_faking_candidate_reference)
+
+        for invalid_visual in invalid_variants:
+            with self.subTest(invalid_visual=invalid_visual):
+                result = verified_result(delay_ms=-20, visual=invalid_visual, audio=audio)
+                self.assertEqual(result["state"], "NO_FIABLE")
+                self.assertFalse(routes.exportacion_hibrida_autorizada(result))
+
+    def test_absolute_result_with_impossible_equivalence_is_blocked(self):
+        visual = {
+            "verified": True,
+            "verification_mode": "absolute",
+            "strong_winner": True,
+            "candidate_delays_ms": [-1000],
+            "candidate_equivalence": {
+                "applied": True,
+                "reason": "half_frame_equivalence_applied",
+                "boundary": "strict",
+                "threshold_ms": 20.0,
+                "ref_fps": 25.0,
+                "esp_fps": 25.0,
+                "effective_esp_fps": 25.0,
+                "tempo": 1.0,
+                "ref_variable_frame_rate": True,
+                "esp_variable_frame_rate": False,
+                "input_candidates_ms": [-1000, 0],
+                "effective_candidates_ms": [-1000],
+                "groups": [{"representative_ms": -1000, "members_ms": [-1000, 0]}],
+                "zero_representative_ms": -1000,
+                "implicit_zero_added": False,
+                "external_relative_controls_ms": [],
+                "relative_reference_kind": None,
+            },
+        }
+        result = verified_result(delay_ms=-1000, visual=visual, audio={
+            "supporting_zones": 4,
+            "delay_ms": -1000,
+            "tolerance_ms": 160,
+        })
+        self.assertEqual(result["state"], "NO_FIABLE")
+        self.assertFalse(routes.exportacion_hibrida_autorizada(result))
+
+    def test_new_absolute_equivalence_requires_winner_to_match_candidates_and_audio(self):
+        equivalence = {
+            "applied": True,
+            "reason": "half_frame_equivalence_applied",
+            "boundary": "strict",
+            "threshold_ms": 20.833333,
+            "ref_fps": 24.0,
+            "esp_fps": 24.0,
+            "effective_esp_fps": 24.0,
+            "tempo": 1.0,
+            "ref_variable_frame_rate": False,
+            "esp_variable_frame_rate": False,
+            "input_candidates_ms": [0, 20],
+            "effective_candidates_ms": [0],
+            "groups": [{"representative_ms": 0, "members_ms": [0, 20]}],
+            "zero_representative_ms": 0,
+            "implicit_zero_added": False,
+            "external_relative_controls_ms": [],
+            "relative_reference_kind": None,
+        }
+        valid_visual = {
+            "verified": True,
+            "verification_mode": "absolute",
+            "strong_winner": True,
+            "winner_delay_ms": 0,
+            "candidate_delays_ms": [0],
+            "candidate_equivalence": equivalence,
+        }
+        valid_audio = {"supporting_zones": 4, "delay_ms": 20, "tolerance_ms": 160}
+        accepted = verified_result(delay_ms=20, visual=valid_visual, audio=valid_audio)
+        self.assertEqual(accepted["state"], "OK_VERIFICADO")
+
+        for winner, audio_delay in ((5000, 5000), (0, 5000), (None, 20)):
+            with self.subTest(winner=winner, audio_delay=audio_delay):
+                invalid_visual = copy.deepcopy(valid_visual)
+                invalid_visual["winner_delay_ms"] = winner
+                result = verified_result(
+                    delay_ms=audio_delay,
+                    visual=invalid_visual,
+                    audio={"supporting_zones": 4, "delay_ms": audio_delay, "tolerance_ms": 160},
+                )
+                self.assertEqual(result["state"], "NO_FIABLE")
+                self.assertFalse(routes.exportacion_hibrida_autorizada(result))
+
+    def test_new_candidate_relative_result_requires_real_effective_target_and_reference(self):
+        visual = {
+            "verified": True,
+            "verification_mode": "relative",
+            "strong_winner": False,
+            "relative_supported": True,
+            "relative_match": True,
+            "relative_target_delay_ms": 5000,
+            "relative_reference_delay_ms": -280,
+            "relative_reference_kind": "candidate",
+            "relative_comparable_zones": 3,
+            "relative_required_zones": 3,
+            "relative_required_wins": 2,
+            "relative_wins": 3,
+            "relative_ties": 0,
+            "relative_losses": 0,
+            "relative_mean_delta": 0.20,
+            "candidate_delays_ms": [-20, -280],
+            "relative_comparisons": [
+                {
+                    "target_delay_ms": 5000,
+                    "reference_delay_ms": -280,
+                    "reference_kind": "candidate",
+                    "delta": 0.20,
+                    "outcome": "win",
+                }
+                for _ in range(3)
+            ],
+            "candidate_equivalence": {
+                "applied": True,
+                "reason": "half_frame_equivalence_applied",
+                "boundary": "strict",
+                "threshold_ms": 20.833333,
+                "ref_fps": 24.0,
+                "esp_fps": 24.0,
+                "effective_esp_fps": 24.0,
+                "tempo": 1.0,
+                "ref_variable_frame_rate": False,
+                "esp_variable_frame_rate": False,
+                "input_candidates_ms": [-20, -280, 0],
+                "effective_candidates_ms": [-20, -280],
+                "groups": [
+                    {"representative_ms": -20, "members_ms": [-20, 0]},
+                    {"representative_ms": -280, "members_ms": [-280]},
+                ],
+                "zero_representative_ms": -20,
+                "implicit_zero_added": False,
+                "external_relative_controls_ms": [],
+                "relative_reference_kind": "candidate",
+            },
+        }
+        result = verified_result(
+            delay_ms=5000,
+            visual=visual,
+            audio={"supporting_zones": 4, "delay_ms": 5000, "tolerance_ms": 160},
+        )
+        self.assertEqual(result["state"], "NO_FIABLE")
+        self.assertFalse(routes.exportacion_hibrida_autorizada(result))
 
     def test_relative_result_with_loss_or_audio_mismatch_is_blocked(self):
         base_visual = {
