@@ -2543,7 +2543,7 @@ function renderCustomMovePanel() {
         : `<div class="custom-move-empty">${subtitleTargetMode ? "Sin carpetas ni videos MKV" : "Sin carpetas"}</div>`;
 
   const selectedVideo = selectedVideoParts.length ? selectedVideoParts[selectedVideoParts.length - 1] : "";
-  const actionLabel = selectedVideo ? "Añadir subtítulo" : "Elegir MKV";
+  const actionLabel = itemActionBusy ? "Preparando..." : selectedVideo ? "Añadir subtítulo" : "Elegir MKV";
 
   return `
     <div class="custom-move-panel">
@@ -2556,7 +2556,7 @@ function renderCustomMovePanel() {
       <div class="custom-move-footer">
         <button class="item-action-button soft" type="button" data-custom-move-back ${disabled}>Volver</button>
         ${subtitleTargetMode
-          ? `<button class="item-action-button output-destination visual-pending" type="button" disabled title="Se activará al conectar el motor">${actionLabel}</button>`
+          ? `<button class="item-action-button output-destination subtitle-target-run ${itemActionBusy ? "is-busy" : ""}" type="button" data-subtitle-target-run ${selectedVideo && !itemActionBusy ? "" : "disabled"}>${actionLabel}</button>`
           : `<button class="item-action-button output-destination" type="button" data-custom-move-run ${disabled}>Mover aqui</button>`}
       </div>
     </div>
@@ -2895,6 +2895,7 @@ function renderActionModal() {
       renderActionModal();
     });
   });
+  modal.querySelector("[data-subtitle-target-run]")?.addEventListener("click", runSubtitleAddAction);
   modal.querySelector("[data-custom-move-run]")?.addEventListener("click", runCustomMoveAction);
   modal.querySelectorAll("[data-workshop-select]").forEach((button) => {
     button.addEventListener("click", () => selectWorkshopVideo(button.dataset.workshopSelect));
@@ -3405,6 +3406,58 @@ async function runCustomMoveAction() {
     playFinishSound(soundJob);
   } catch (error) {
     itemActionError = error.message || "No se pudo mover";
+  } finally {
+    itemActionBusy = false;
+    renderActionModal();
+  }
+}
+
+async function runSubtitleAddAction() {
+  const videoParts = Array.isArray(customMoveState.selectedVideoParts) ? customMoveState.selectedVideoParts : [];
+  if (!actionModalItem || actionModalItem.mode !== "subtitle-target" || !videoParts.length || itemActionBusy) return;
+
+  const detail = `${actionModalItem.source}:${actionModalItem.parts.join("/")}->${videoParts.join("/")}`;
+  const soundJob = finishSoundJob("subtitle-add", detail);
+  const phase = "subtitle_add";
+  const label = "Añadiendo subtítulo";
+  prepareFinishSound();
+  itemActionBusy = true;
+  itemActionError = "";
+  renderActionModal();
+
+  try {
+    const params = new URLSearchParams({
+      v: "seguimiento_trailer_job_start",
+      action: "add_subtitle",
+      source: actionModalItem.source,
+      t: String(Date.now())
+    });
+    actionModalItem.parts.forEach((part) => params.append("part", part));
+    videoParts.forEach((part) => params.append("video_part", part));
+
+    const response = await fetch(`/api?${params.toString()}`, { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
+
+    saveTrailerJobState({
+      job: data.job,
+      status: data.status || "running",
+      action: data.action || "add_subtitle",
+      phase,
+      label,
+      progress: data.progress || { phase, percent: 0, label },
+      result: null,
+      error: "",
+      soundJob,
+      soundDone: false
+    });
+    actionModalItem = null;
+    resetCustomMoveState();
+    renderHeaderWorkshop();
+    statusText.textContent = "Añadiendo subtítulo al MKV";
+    startTrailerJobPolling();
+  } catch (error) {
+    itemActionError = error.message || "No se pudo añadir el subtítulo";
   } finally {
     itemActionBusy = false;
     renderActionModal();

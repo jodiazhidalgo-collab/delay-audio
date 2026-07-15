@@ -1619,7 +1619,7 @@ button.watch-chevron {
   border-top: 1px solid rgba(145, 160, 177, .16);
 }
 
-.item-action-button.visual-pending:disabled {
+.item-action-button.subtitle-target-run:disabled:not(.is-busy) {
   cursor: default;
 }
 

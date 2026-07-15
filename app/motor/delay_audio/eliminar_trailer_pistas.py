@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,77 @@ from capitulos_10m import apply_chapters_10m as apply_chapters_10m_mkv
 
 
 SUPPORTED_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".ts", ".mov", ".wmv"}
+SUBTITLE_LANGUAGE_ALIASES = {
+    "es": "spa",
+    "spa": "spa",
+    "spanish": "spa",
+    "espanol": "spa",
+    "español": "spa",
+    "castellano": "spa",
+    "castilian": "spa",
+    "en": "eng",
+    "eng": "eng",
+    "english": "eng",
+    "ingles": "eng",
+    "inglés": "eng",
+    "fr": "fra",
+    "fra": "fra",
+    "fre": "fra",
+    "french": "fra",
+    "frances": "fra",
+    "francés": "fra",
+    "de": "deu",
+    "deu": "deu",
+    "ger": "deu",
+    "german": "deu",
+    "aleman": "deu",
+    "alemán": "deu",
+    "it": "ita",
+    "ita": "ita",
+    "italian": "ita",
+    "italiano": "ita",
+    "pt": "por",
+    "por": "por",
+    "portuguese": "por",
+    "portugues": "por",
+    "português": "por",
+    "ja": "jpn",
+    "jpn": "jpn",
+    "japanese": "jpn",
+    "japones": "jpn",
+    "japonés": "jpn",
+    "ru": "rus",
+    "rus": "rus",
+    "russian": "rus",
+    "ruso": "rus",
+    "ca": "cat",
+    "cat": "cat",
+    "catalan": "cat",
+    "catalán": "cat",
+    "gl": "glg",
+    "glg": "glg",
+    "galician": "glg",
+    "gallego": "glg",
+    "eu": "eus",
+    "eus": "eus",
+    "baq": "eus",
+    "basque": "eus",
+    "euskera": "eus",
+}
+SUBTITLE_SUFFIX_QUALIFIERS = {
+    "cc",
+    "default",
+    "forced",
+    "forzado",
+    "forzados",
+    "full",
+    "hearingimpaired",
+    "hi",
+    "lyrics",
+    "sdh",
+    "sign",
+    "signs",
+}
 
 
 def run_cmd(cmd, timeout=120):
@@ -241,6 +313,20 @@ def lang_label(value):
     return raw.upper() if len(raw) <= 3 else raw
 
 
+def subtitle_language_from_filename(subtitle_path):
+    stem = Path(subtitle_path).stem
+    tokens = [
+        token.lower()
+        for token in re.split(r"[.\s_\-\[\]()]+", stem)
+        if token.strip()
+    ]
+    while tokens and tokens[-1] in SUBTITLE_SUFFIX_QUALIFIERS:
+        tokens.pop()
+    if not tokens:
+        return "und"
+    return SUBTITLE_LANGUAGE_ALIASES.get(tokens[-1], "und")
+
+
 def stream_title(stream):
     tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
     return str(tags.get("title") or tags.get("handler_name") or "").strip()
@@ -309,6 +395,19 @@ def mkv_subtitle_tracks(path):
             "count": count,
         })
     return out
+
+
+def mkv_track_type_counts(path):
+    data = json_cmd(["mkvmerge", "-J", str(path)], timeout=60)
+    tracks = data.get("tracks") if isinstance(data.get("tracks"), list) else []
+    counts = {"video": 0, "audio": 0, "subtitles": 0}
+    for track in tracks:
+        if not isinstance(track, dict):
+            continue
+        track_type = str(track.get("type") or "")
+        if track_type in counts:
+            counts[track_type] += 1
+    return counts
 
 
 def ffprobe_data(path):
@@ -471,6 +570,121 @@ def validate_duration(original, candidate):
 def temp_path_for(path, tag="sin-trailer"):
     stamp = f"{int(time.time())}-{os.getpid()}"
     return path.with_name(f".{path.stem}.{tag}-{stamp}.tmp{path.suffix}")
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def add_srt_to_mkv(video_path, subtitle_path, progress_path=None):
+    path = Path(video_path)
+    subtitle = Path(subtitle_path)
+    if not path.exists() or not path.is_file():
+        return {"ok": False, "error": "No encuentro el MKV"}
+    if path.suffix.lower() != ".mkv":
+        return {"ok": False, "error": "El destino debe ser MKV"}
+    if not subtitle.exists() or not subtitle.is_file():
+        return {"ok": False, "error": "No encuentro el SRT"}
+    if subtitle.suffix.lower() != ".srt":
+        return {"ok": False, "error": "El subtitulo debe ser SRT"}
+
+    language = subtitle_language_from_filename(subtitle)
+    source_size = subtitle.stat().st_size
+    source_digest = file_sha256(subtitle)
+    original_stat = path.stat()
+    counts_before = mkv_track_type_counts(path)
+    subtitles_before = mkv_subtitle_tracks(path)
+    tmp_path = temp_path_for(path, "add-srt")
+    cmd = [
+        "mkvmerge",
+        "-o",
+        str(tmp_path),
+        str(path),
+        "--language",
+        f"0:{language}",
+        "--track-name",
+        "0:",
+        "--default-track-flag",
+        "0:no",
+        "--forced-display-flag",
+        "0:no",
+        str(subtitle),
+    ]
+    if progress_path:
+        cmd.insert(1, "--gui-mode")
+
+    try:
+        if progress_path:
+            proc = run_mkvmerge_with_progress(
+                cmd,
+                progress_path,
+                "subtitle_add",
+                "Añadiendo subtítulo",
+                timeout=21600,
+            )
+        else:
+            proc = run_cmd(cmd, timeout=21600)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout or "mkvmerge fallo").strip())
+        if not tmp_path.exists() or tmp_path.stat().st_size <= 4096:
+            raise RuntimeError("No se genero un temporal MKV valido")
+
+        counts_after = mkv_track_type_counts(tmp_path)
+        if counts_after["video"] != counts_before["video"]:
+            raise RuntimeError("La comprobacion de video no coincide")
+        if counts_after["audio"] != counts_before["audio"]:
+            raise RuntimeError("La comprobacion de audio no coincide")
+        if counts_after["subtitles"] != counts_before["subtitles"] + 1:
+            raise RuntimeError("La comprobacion de subtitulos no coincide")
+
+        subtitles_after = mkv_subtitle_tracks(tmp_path)
+        if len(subtitles_after) != len(subtitles_before) + 1:
+            raise RuntimeError("No se encontro la nueva pista de subtitulo")
+        added_track = subtitles_after[-1]
+        if added_track.get("language") != language:
+            raise RuntimeError("El idioma del subtitulo añadido no coincide")
+        if added_track.get("name"):
+            raise RuntimeError("El nombre de la pista de subtitulo no quedo vacio")
+        if added_track.get("default"):
+            raise RuntimeError("La pista de subtitulo quedo como predeterminada")
+        if added_track.get("forced"):
+            raise RuntimeError("La pista de subtitulo quedo como forzada")
+
+        validate_duration(path, tmp_path)
+        if not subtitle.exists() or subtitle.stat().st_size != source_size or file_sha256(subtitle) != source_digest:
+            raise RuntimeError("El SRT original cambio durante el proceso")
+
+        copy_stat(path, tmp_path)
+        try:
+            os.utime(tmp_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        except Exception:
+            pass
+        os.replace(tmp_path, path)
+
+        if not subtitle.exists() or subtitle.stat().st_size != source_size or file_sha256(subtitle) != source_digest:
+            raise RuntimeError("El SRT original no se conservo intacto")
+
+        refreshed = media_info(path)
+        return {
+            "ok": True,
+            "message": "Subtítulo añadido al MKV",
+            "language": language,
+            "added_track": added_track,
+            "source_preserved": True,
+            "info": refreshed.get("info"),
+            "path": str(path),
+            "name": path.name,
+        }
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
 
 
 def remux_mkv_temporal(candidate, original, progress_path=None, phase="audio", label="Remuxando"):
@@ -975,15 +1189,18 @@ def apply_chapters_to_video(video_path, video_id=""):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("info", "delete", "convert_audio", "rename_language", "chapters_10m"))
+    parser.add_argument("action", choices=("info", "delete", "add_subtitle", "convert_audio", "rename_language", "chapters_10m"))
     parser.add_argument("--path", required=True)
     parser.add_argument("--id", action="append", default=[])
+    parser.add_argument("--subtitle-path", default="")
     parser.add_argument("--progress-path", default="")
     args = parser.parse_args()
 
     try:
         if args.action == "info":
             payload = media_info(args.path)
+        elif args.action == "add_subtitle":
+            payload = add_srt_to_mkv(args.path, args.subtitle_path, progress_path=args.progress_path)
         elif args.action == "convert_audio":
             payload = convert_audio_ac3(args.path, args.id[0] if args.id else "", progress_path=args.progress_path)
         elif args.action == "rename_language":

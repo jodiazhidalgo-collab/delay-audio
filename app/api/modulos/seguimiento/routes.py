@@ -1422,6 +1422,27 @@ def resolve_media_move_folder(parts):
     return target, clean_parts or [], None
 
 
+def resolve_media_mkv_target(parts):
+    clean_parts, error = clean_media_move_parts(parts)
+    if error:
+        return None, clean_parts or [], error
+    if not clean_parts:
+        return None, [], "Selecciona un MKV"
+
+    try:
+        root = MEDIA_MOVE_ROOT
+        target = root.joinpath(*clean_parts).resolve()
+        target.relative_to(root)
+    except (OSError, ValueError):
+        return None, clean_parts, "Ruta no valida"
+
+    if not root.is_dir():
+        return None, clean_parts, "Raiz media no accesible"
+    if not target.is_file() or target.suffix.lower() != ".mkv":
+        return None, clean_parts, "El destino debe ser un MKV"
+    return target, clean_parts, None
+
+
 def media_move_label(parts):
     return "Media" if not parts else "/".join(parts)
 
@@ -1634,7 +1655,7 @@ def active_trailer_job():
     return None
 
 
-def create_trailer_job(action, target, ids, phase, label):
+def create_trailer_job(action, target, ids, phase, label, subtitle_path=""):
     running = active_trailer_job()
     if running:
         return None, f"Ya hay un proceso en marcha: {running.get('label', 'Editar video')}"
@@ -1651,6 +1672,7 @@ def create_trailer_job(action, target, ids, phase, label):
         "label": label,
         "target": str(target),
         "ids": [str(item) for item in ids],
+        "subtitle_path": str(subtitle_path or ""),
         "job_dir": job_dir,
         "progress_path": os.path.join(job_dir, "progress.json"),
         "result_path": os.path.join(job_dir, "resultado.json"),
@@ -1663,6 +1685,7 @@ def create_trailer_job(action, target, ids, phase, label):
         "action": action,
         "target": str(target),
         "ids": [str(item) for item in ids],
+        "subtitle_path": str(subtitle_path or ""),
     }, settings={
         "phase": phase,
         "label": label,
@@ -1689,12 +1712,15 @@ def run_trailer_job(job):
     ]
     for track_id in job.get("ids") or []:
         cmd.extend(["--id", str(track_id)])
+    if job.get("subtitle_path"):
+        cmd.extend(["--subtitle-path", str(job["subtitle_path"])])
 
     try:
         diagnostico_event(job, job.get("phase") or "trailer_job", "started", "Arranca motor de trailer", {
             "action": job.get("action"),
             "target": job.get("target"),
             "ids": job.get("ids") or [],
+            "subtitle_path": job.get("subtitle_path") or "",
         })
         started_at = time.time()
         proc = subprocess.run(
@@ -1810,11 +1836,25 @@ def seguimiento_trailer_job_start(q):
     target, error = resolve_action_target(source_id, q.get("part", []))
     if error:
         return {"ok": False, "error": error}
-    if not target.is_file() or item_kind(target) != "video":
-        return {"ok": False, "error": "Solo disponible para videos"}
 
     action = str(q.get("action", [""])[0]).strip().lower()
-    if action == "audio":
+    if action == "add_subtitle":
+        if not target.is_file() or target.suffix.lower() != ".srt":
+            return {"ok": False, "error": "El origen debe ser un SRT"}
+        video_target, _, video_error = resolve_media_mkv_target(q.get("video_part", []))
+        if video_error:
+            return {"ok": False, "error": video_error}
+        job, job_error = create_trailer_job(
+            "add_subtitle",
+            video_target,
+            [],
+            "subtitle_add",
+            "Añadiendo subtítulo",
+            subtitle_path=target,
+        )
+    elif not target.is_file() or item_kind(target) != "video":
+        return {"ok": False, "error": "Solo disponible para videos"}
+    elif action == "audio":
         audio_id = str(q.get("id", [""])[0]).strip()
         if not audio_id:
             return {"ok": False, "error": "Selecciona una pista de audio"}
