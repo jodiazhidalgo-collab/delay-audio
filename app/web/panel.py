@@ -47,6 +47,7 @@ def pagina():
   <script src="/static/js/entry_sound.js?v=entrada-silenciosa-20260621"></script>
   <script src="/static/js/delay_audio_sounds.js?v=sonido-final-procesos-20260619"></script>
   <script>window.DelayAudioConfig = {path_config};</script>
+  <script src="/static/js/panel_maestro_scroll_bridge.js?v=20260718"></script>
   <script src="/static/js/delay_audio.js?v=resultado-hibrido-fase6-20260710"></script>
 </body>
 </html>'''.encode("utf-8")
